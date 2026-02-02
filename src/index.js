@@ -1,8 +1,12 @@
 const config = require('./config/env');
 const bot = require('./bot');
 const { Markup } = require('telegraf');
+const cron = require('node-cron');
 const GoogleSheetsService = require('./services/googleSheetsService');
 const IikoService = require('./services/iikoService');
+
+// ID группы для ежедневных отчётов
+const REPORT_GROUP_ID = -5237107467;
 
 console.log('Starting iiko Writeoff Bot...');
 console.log(`Environment: ${config.nodeEnv}`);
@@ -851,6 +855,7 @@ bot.command('help', (ctx) => {
     '/start - Главное меню\n' +
     '/writeoff - Создать акт списания\n' +
     '/refresh - Обновить справочники из iiko\n' +
+    '/report - Отправить отчёт за день\n' +
     '/help - Эта справка\n\n' +
     'Как использовать:\n' +
     '1. Нажми "Списать в iiko"\n' +
@@ -863,6 +868,99 @@ bot.command('help', (ctx) => {
     'Данные сохраняются в журнал Google Sheets.'
   );
 });
+
+// ==================== КОМАНДА /report ====================
+bot.command('report', async (ctx) => {
+  await ctx.reply('Формирую отчёт...');
+  await sendDailyReport();
+  await ctx.reply('Отчёт отправлен в группу.');
+});
+
+// ==================== ЕЖЕДНЕВНЫЙ ОТЧЁТ ====================
+
+/**
+ * Отправить ежедневный отчёт в группу
+ */
+async function sendDailyReport() {
+  try {
+    console.log('Generating daily report...');
+
+    const stats = await sheetsService.getTodayWriteoffs();
+
+    // Формируем дату
+    const today = new Date().toLocaleDateString('ru-RU', {
+      timeZone: 'Asia/Novosibirsk',
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric'
+    });
+
+    let message = `📊 Отчёт по списаниям за ${today}\n\n`;
+
+    if (stats.total === 0) {
+      message += `Списаний за сегодня не было.`;
+    } else {
+      // Общая статистика
+      message += `Всего списаний: ${stats.total}\n`;
+      message += `✅ Успешно: ${stats.success}\n`;
+      if (stats.errors > 0) {
+        message += `❌ Ошибок: ${stats.errors}\n`;
+      }
+      if (stats.pending > 0) {
+        message += `⏳ В обработке: ${stats.pending}\n`;
+      }
+
+      // По складам
+      if (Object.keys(stats.byStore).length > 0) {
+        message += `\n📦 По складам:\n`;
+        for (const [store, count] of Object.entries(stats.byStore)) {
+          message += `  • ${store}: ${count}\n`;
+        }
+      }
+
+      // По счетам
+      if (Object.keys(stats.byAccount).length > 1 || !stats.byAccount['Без счёта']) {
+        message += `\n📋 По счетам:\n`;
+        for (const [account, count] of Object.entries(stats.byAccount)) {
+          if (account !== 'Без счёта') {
+            message += `  • ${account}: ${count}\n`;
+          }
+        }
+      }
+
+      // Последние 5 списаний
+      if (stats.items.length > 0) {
+        message += `\n📝 Последние списания:\n`;
+        const lastItems = stats.items.slice(-5).reverse();
+        for (const item of lastItems) {
+          const statusIcon = item.status === 'IIKO_OK' ? '✅' : item.status === 'IIKO_ERROR' ? '❌' : '⏳';
+          const shortMsg = item.rawMessage.length > 40
+            ? item.rawMessage.substring(0, 40) + '...'
+            : item.rawMessage;
+          message += `${statusIcon} ${item.storeName}: ${shortMsg}\n`;
+        }
+      }
+    }
+
+    // Отправляем в группу
+    await bot.telegram.sendMessage(REPORT_GROUP_ID, message);
+    console.log('Daily report sent to group');
+
+  } catch (error) {
+    console.error('Error sending daily report:', error.message);
+  }
+}
+
+// Крон-задача: каждый день в 21:30 по Новосибирску (UTC+7)
+// 21:30 NSK = 14:30 UTC
+cron.schedule('30 14 * * *', () => {
+  console.log('Running daily report cron job...');
+  sendDailyReport();
+}, {
+  timezone: 'UTC'
+});
+
+console.log('Daily report scheduled for 21:30 Novosibirsk time');
 
 // ==================== GRACEFUL SHUTDOWN ====================
 process.once('SIGINT', () => {

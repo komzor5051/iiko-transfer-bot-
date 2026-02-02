@@ -251,4 +251,80 @@ class GoogleSheetsService {
   }
 }
 
+  /**
+   * Получить все списания за сегодня (по времени Новосибирска)
+   * @returns {Promise<Object>} - Статистика за день
+   */
+  async getTodayWriteoffs() {
+    try {
+      const response = await this.sheets.spreadsheets.values.get({
+        spreadsheetId: this.spreadsheetId,
+        range: `${this.sheetName}!A2:L10000`,
+        valueRenderOption: 'FORMATTED_VALUE'
+      });
+
+      const rows = response.data.values || [];
+
+      // Получаем сегодняшнюю дату по Новосибирску
+      const today = new Date().toLocaleDateString('ru-RU', {
+        timeZone: 'Asia/Novosibirsk',
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric'
+      });
+
+      // Фильтруем записи за сегодня (timestamp в колонке A начинается с даты)
+      const todayRows = rows.filter(row => {
+        const timestamp = row[0] || '';
+        return timestamp.startsWith(today);
+      });
+
+      // Считаем статистику
+      const stats = {
+        total: todayRows.length,
+        success: 0,
+        errors: 0,
+        pending: 0,
+        byStore: {},
+        byAccount: {},
+        items: []
+      };
+
+      for (const row of todayRows) {
+        const storeName = row[2] || 'Неизвестный склад';
+        const accountName = row[4] || 'Без счёта';
+        const status = row[10] || 'NEW';
+        const rawMessage = row[5] || '';
+        const docNumber = row[9] || '';
+
+        // Считаем статусы
+        if (status === 'IIKO_OK') stats.success++;
+        else if (status === 'IIKO_ERROR') stats.errors++;
+        else stats.pending++;
+
+        // Группируем по складам
+        stats.byStore[storeName] = (stats.byStore[storeName] || 0) + 1;
+
+        // Группируем по счетам
+        stats.byAccount[accountName] = (stats.byAccount[accountName] || 0) + 1;
+
+        // Добавляем в список
+        stats.items.push({
+          timestamp: row[0],
+          storeName,
+          accountName,
+          rawMessage,
+          status,
+          docNumber
+        });
+      }
+
+      return stats;
+    } catch (error) {
+      console.error('Error getting today writeoffs:', error.message);
+      return { total: 0, success: 0, errors: 0, pending: 0, byStore: {}, byAccount: {}, items: [] };
+    }
+  }
+}
+
 module.exports = GoogleSheetsService;
