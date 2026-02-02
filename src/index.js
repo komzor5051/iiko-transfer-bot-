@@ -355,6 +355,11 @@ bot.on('text', async (ctx) => {
   const state = getUserState(userId);
   const text = ctx.message.text.trim();
 
+  // Пропускаем команды - они обрабатываются отдельными обработчиками
+  if (text.startsWith('/')) {
+    return;
+  }
+
   // ===== ПОИСК ТОВАРА =====
   if (state.step === 'search_product') {
     // Проверяем загружены ли товары
