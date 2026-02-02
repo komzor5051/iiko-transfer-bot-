@@ -331,13 +331,17 @@ class IikoService {
         dateIncoming,
         status: 'NEW',
         storeId,
-        accountId,
         comment: comment || `Списание от ${now.toLocaleDateString('ru-RU')}`,
         items: items.map((item, index) => ({
           productId: item.productId,
           amount: item.amount
         }))
       };
+
+      // accountId опционален - добавляем только если указан
+      if (accountId) {
+        documentBody.accountId = accountId;
+      }
 
       if (documentNumber) {
         documentBody.documentNumber = documentNumber;

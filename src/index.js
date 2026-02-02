@@ -69,7 +69,8 @@ async function loadIikoReferences() {
       id: p.id,
       name: p.name || '',
       code: p.code || '',
-      num: p.num || ''
+      num: p.num || '',
+      mainUnit: p.mainUnit || 'кг'
     }));
     console.log(`Loaded ${PRODUCTS.length} products`);
   } catch (error) {
@@ -352,6 +353,16 @@ bot.on('text', async (ctx) => {
 
   // ===== ПОИСК ТОВАРА =====
   if (state.step === 'search_product') {
+    // Проверяем загружены ли товары
+    if (PRODUCTS.length === 0) {
+      return ctx.reply(
+        'Номенклатура не загружена.\nИспользуй /refresh для обновления.',
+        Markup.inlineKeyboard([
+          [Markup.button.callback('Отмена', 'cancel')]
+        ])
+      );
+    }
+
     if (text.length < 2) {
       return ctx.reply('Введи минимум 2 символа для поиска');
     }
@@ -359,7 +370,7 @@ bot.on('text', async (ctx) => {
     // Ищем товары по названию
     const searchLower = text.toLowerCase();
     const matches = PRODUCTS.filter(p =>
-      p.name.toLowerCase().includes(searchLower)
+      p.name && p.name.toLowerCase().includes(searchLower)
     ).slice(0, 8); // Максимум 8 результатов
 
     if (matches.length === 0) {
@@ -487,6 +498,16 @@ bot.action('back_to_search', async (ctx) => {
   await ctx.answerCbQuery();
 
   const state = getUserState(ctx.from.id);
+
+  if (!state.storeName) {
+    return ctx.editMessageText(
+      'Сессия истекла. Начни заново.',
+      Markup.inlineKeyboard([
+        [Markup.button.callback('Начать заново', 'start_writeoff')]
+      ])
+    );
+  }
+
   const itemsCount = state.items?.length || 0;
 
   setUserState(ctx.from.id, {
@@ -496,7 +517,9 @@ bot.action('back_to_search', async (ctx) => {
   });
 
   let message = `Склад: ${state.storeName}\n`;
-  if (state.accountName) message += `Счёт: ${state.accountName}\n`;
+  if (state.accountName && state.accountName !== 'Не указан') {
+    message += `Счёт: ${state.accountName}\n`;
+  }
   message += `\nДобавлено позиций: ${itemsCount}\n\n`;
   message += `Введи название товара для поиска:`;
 
@@ -513,6 +536,16 @@ bot.action('finish_adding', async (ctx) => {
   await ctx.answerCbQuery();
 
   const state = getUserState(ctx.from.id);
+
+  if (!state.storeName) {
+    return ctx.editMessageText(
+      'Сессия истекла. Начни заново.',
+      Markup.inlineKeyboard([
+        [Markup.button.callback('Начать заново', 'start_writeoff')]
+      ])
+    );
+  }
+
   const items = state.items || [];
 
   if (items.length === 0) {
@@ -579,11 +612,6 @@ bot.action('confirm_writeoff', async (ctx) => {
     // 2. Отправляем в iiko Server API
     // Берем только товары с productId (успешно сопоставленные)
     const validItems = state.parsedItems.filter(item => !item.parseError && item.productId);
-
-    // Проверяем наличие accountId
-    if (!state.accountId) {
-      throw new Error('Не выбран расходный счёт. Начните заново.');
-    }
 
     // Если нет ни одного сопоставленного товара
     if (validItems.length === 0) {
@@ -670,6 +698,44 @@ bot.action('confirm_writeoff', async (ctx) => {
 
     clearUserState(userId);
   }
+});
+
+// ==================== CALLBACK: Повторить списание ====================
+bot.action('retry_writeoff', async (ctx) => {
+  await ctx.answerCbQuery();
+
+  const state = getUserState(ctx.from.id);
+
+  if (!state.parsedItems || state.parsedItems.length === 0) {
+    return ctx.editMessageText(
+      'Нет данных для повтора. Начни заново.',
+      Markup.inlineKeyboard([
+        [Markup.button.callback('Начать заново', 'start_writeoff')]
+      ])
+    );
+  }
+
+  // Повторно отправляем в iiko
+  setUserState(ctx.from.id, {
+    ...state,
+    step: 'confirm'
+  });
+
+  const itemsList = state.parsedItems.map((item, i) =>
+    `${i + 1}. ${item.name} - ${item.amount} ${item.unit}`
+  ).join('\n');
+
+  await ctx.editMessageText(
+    `Повторная попытка...\n\n` +
+    `Склад: ${state.storeName}\n` +
+    `Счёт: ${state.accountName || '-'}\n\n` +
+    `Позиции (${state.parsedItems.length}):\n${itemsList}\n\n` +
+    `Подтвердить списание?`,
+    Markup.inlineKeyboard([
+      [Markup.button.callback('✓ Подтвердить', 'confirm_writeoff')],
+      [Markup.button.callback('Отмена', 'cancel')]
+    ])
+  );
 });
 
 // ==================== CALLBACK: Изменить позиции ====================
@@ -784,13 +850,16 @@ bot.command('help', (ctx) => {
     'Справка по боту списаний:\n\n' +
     '/start - Главное меню\n' +
     '/writeoff - Создать акт списания\n' +
+    '/refresh - Обновить справочники из iiko\n' +
     '/help - Эта справка\n\n' +
     'Как использовать:\n' +
     '1. Нажми "Списать в iiko"\n' +
-    '2. Выбери склад\n' +
-    '3. Отправь список позиций в формате:\n' +
-    '   помидор 5 кг; огурец 3 кг\n' +
-    '4. Подтверди списание\n\n' +
+    '2. Выбери склад и счёт\n' +
+    '3. Введи название товара для поиска\n' +
+    '4. Выбери товар из списка\n' +
+    '5. Введи количество (например: 5 или 5 кг)\n' +
+    '6. Добавь ещё товары или нажми "Готово"\n' +
+    '7. Подтверди списание\n\n' +
     'Данные сохраняются в журнал Google Sheets.'
   );
 });
