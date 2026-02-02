@@ -876,9 +876,14 @@ bot.command('help', (ctx) => {
 
 // ==================== КОМАНДА /report ====================
 bot.command('report', async (ctx) => {
-  await ctx.reply('Формирую отчёт...');
-  await sendDailyReport();
-  await ctx.reply('Отчёт отправлен в группу.');
+  try {
+    await ctx.reply('Формирую отчёт...');
+    await sendDailyReport();
+    await ctx.reply('✅ Отчёт отправлен в группу.');
+  } catch (error) {
+    console.error('Error in /report command:', error.message);
+    await ctx.reply(`❌ Ошибка при формировании отчёта: ${error.message}`);
+  }
 });
 
 // ==================== ЕЖЕДНЕВНЫЙ ОТЧЁТ ====================
