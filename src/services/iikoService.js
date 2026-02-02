@@ -1,4 +1,11 @@
 const axios = require('axios');
+const { XMLParser } = require('fast-xml-parser');
+
+// XML парсер для ответов iiko API
+const xmlParser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: '@_'
+});
 
 /**
  * Сервис для работы с iiko Server API (REST API v2)
@@ -153,13 +160,14 @@ class IikoService {
         `${this.baseUrl}/api/corporation/stores`,
         {
           params: { key },
+          headers: { 'Accept': 'application/xml' },
           timeout: 15000
         }
       );
 
-      // Ответ - XML или JSON в зависимости от версии
-      // Парсим массив складов
-      const stores = response.data?.corporateItemDto || response.data || [];
+      // iiko возвращает XML, парсим его
+      const parsed = xmlParser.parse(response.data);
+      const stores = parsed?.corporateItemDtoes?.corporateItemDto || [];
 
       return Array.isArray(stores) ? stores : [stores];
     } catch (error) {
@@ -223,11 +231,14 @@ class IikoService {
         `${this.baseUrl}/api/products`,
         {
           params: { key },
+          headers: { 'Accept': 'application/xml' },
           timeout: 30000
         }
       );
 
-      const products = response.data?.productDto || response.data || [];
+      // iiko возвращает XML, парсим его
+      const parsed = xmlParser.parse(response.data);
+      const products = parsed?.productDtoes?.productDto || [];
 
       return Array.isArray(products) ? products : [products];
     } catch (error) {

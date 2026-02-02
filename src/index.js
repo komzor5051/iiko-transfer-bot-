@@ -41,7 +41,7 @@ async function loadIikoReferences() {
     const stores = await iikoService.getStores();
     STORES = stores.map(s => ({
       id: s.id,
-      name: s.name || s.code || 'Без названия'
+      name: s.name || s.code || `Склад ${s.id?.slice(0, 8)}`
     }));
     console.log(`Loaded ${STORES.length} stores`);
   } catch (error) {
@@ -54,7 +54,7 @@ async function loadIikoReferences() {
     const accounts = await iikoService.getExpenseAccounts();
     EXPENSE_ACCOUNTS = accounts.map(a => ({
       id: a.id,
-      name: a.name || a.code || 'Без названия'
+      name: a.name || a.code || `Счёт ${a.id?.slice(0, 8)}`
     }));
     console.log(`Loaded ${EXPENSE_ACCOUNTS.length} expense accounts`);
   } catch (error) {
