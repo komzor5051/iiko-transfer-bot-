@@ -112,7 +112,8 @@ function clearUserState(userId) {
 function formatItems(items, showMatched = false) {
   return items.map((item, i) => {
     if (item.parseError) {
-      return `${i + 1}. ${item.name} (не распознано)`;
+      const reason = item.errorReason || 'не распознано';
+      return `${i + 1}. ${item.name} (${reason})`;
     }
     let line = `${i + 1}. ${item.name} - ${item.amount} ${item.unit}`;
     if (showMatched) {

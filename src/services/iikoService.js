@@ -421,7 +421,8 @@ class IikoService {
 
     for (const part of parts) {
       // Ищем число и единицу измерения в конце строки
-      // Примеры: "помидор 5 кг", "курица филе 10.5 kg", "масло 2л"
+      // Примеры: "помидор 5 кг", "курица филе 10.5 kg", "масло 2л", "сыр 1.5кг"
+      // \s* после числа позволяет писать без пробела: "5кг"
       const match = part.match(/^(.+?)\s+([\d.,]+)\s*(кг|kg|г|g|л|l|шт|pcs)?$/i);
 
       if (match) {
@@ -443,8 +444,17 @@ class IikoService {
             name,
             amount,
             unit,
-            // productId будет заполняться при сопоставлении с номенклатурой iiko
             productId: null
+          });
+        } else {
+          // Regex совпал, но количество <= 0 или невалидное
+          items.push({
+            name: name || part,
+            amount: amount || 0,
+            unit,
+            productId: null,
+            parseError: true,
+            errorReason: amount <= 0 ? 'Количество должно быть больше 0' : 'Невалидные данные'
           });
         }
       } else {
@@ -454,7 +464,8 @@ class IikoService {
           amount: 0,
           unit: 'кг',
           productId: null,
-          parseError: true
+          parseError: true,
+          errorReason: 'Не распознан формат'
         });
       }
     }
