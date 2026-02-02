@@ -279,30 +279,23 @@ bot.action(/^select_store:(.+)$/, async (ctx) => {
 
   // Показываем выбор расходного счета
   if (EXPENSE_ACCOUNTS.length === 0) {
-    // Если счетов нет, пропускаем этот шаг и используем дефолтный
+    // Если счетов нет, пропускаем этот шаг и переходим к поиску товаров
     setUserState(ctx.from.id, {
-      step: 'waiting_items',
+      step: 'search_product',
       storeId: store.id,
       storeName: store.name,
       accountId: null,
-      accountName: 'Не указан'
+      accountName: 'Не указан',
+      items: []
     });
 
     return ctx.editMessageText(
       `Склад: ${store.name}\n\n` +
-      'Теперь отправь список позиций для списания.\n\n' +
-      'Формат:\n' +
-      '`помидор 5 кг; огурец 3 кг; курица филе 10 кг`\n\n' +
-      'Или каждую позицию с новой строки:\n' +
-      '`помидор 5 кг\n' +
-      'огурец 3 кг\n' +
-      'курица филе 10 кг`',
-      {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback('Отмена', 'cancel')]
-        ])
-      }
+      `Добавлено позиций: 0\n\n` +
+      `Введи название товара для поиска:`,
+      Markup.inlineKeyboard([
+        [Markup.button.callback('Отмена', 'cancel')]
+      ])
     );
   }
 
@@ -331,30 +324,23 @@ bot.action(/^select_account:(.+)$/, async (ctx) => {
     return ctx.editMessageText('Ошибка. Попробуй /writeoff заново.');
   }
 
-  // Сохраняем выбранный счёт
+  // Сохраняем выбранный счёт и переходим к поиску товаров
   setUserState(ctx.from.id, {
     ...state,
-    step: 'waiting_items',
+    step: 'search_product',
     accountId: account.id,
-    accountName: account.name
+    accountName: account.name,
+    items: [] // Список добавленных позиций
   });
 
   await ctx.editMessageText(
     `Склад: ${state.storeName}\n` +
     `Счёт: ${account.name}\n\n` +
-    'Теперь отправь список позиций для списания.\n\n' +
-    'Формат:\n' +
-    '`помидор 5 кг; огурец 3 кг; курица филе 10 кг`\n\n' +
-    'Или каждую позицию с новой строки:\n' +
-    '`помидор 5 кг\n' +
-    'огурец 3 кг\n' +
-    'курица филе 10 кг`',
-    {
-      parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback('Отмена', 'cancel')]
-      ])
-    }
+    `Добавлено позиций: 0\n\n` +
+    `Введи название товара для поиска:`,
+    Markup.inlineKeyboard([
+      [Markup.button.callback('Отмена', 'cancel')]
+    ])
   );
 });
 
@@ -362,72 +348,201 @@ bot.action(/^select_account:(.+)$/, async (ctx) => {
 bot.on('text', async (ctx) => {
   const userId = ctx.from.id;
   const state = getUserState(userId);
+  const text = ctx.message.text.trim();
 
-  // Если пользователь не в процессе списания
-  if (state.step !== 'waiting_items') {
-    return ctx.reply(
-      'Используй /start или /writeoff чтобы начать списание.',
+  // ===== ПОИСК ТОВАРА =====
+  if (state.step === 'search_product') {
+    if (text.length < 2) {
+      return ctx.reply('Введи минимум 2 символа для поиска');
+    }
+
+    // Ищем товары по названию
+    const searchLower = text.toLowerCase();
+    const matches = PRODUCTS.filter(p =>
+      p.name.toLowerCase().includes(searchLower)
+    ).slice(0, 8); // Максимум 8 результатов
+
+    if (matches.length === 0) {
+      return ctx.reply(
+        `Товар "${text}" не найден.\n\nПопробуй другое название:`,
+        Markup.inlineKeyboard([
+          [Markup.button.callback('Отмена', 'cancel')]
+        ])
+      );
+    }
+
+    // Показываем результаты поиска
+    const buttons = matches.map(p =>
+      [Markup.button.callback(
+        p.name.substring(0, 35) + (p.name.length > 35 ? '...' : ''),
+        `select_product:${p.id}`
+      )]
+    );
+    buttons.push([Markup.button.callback('« Искать другой', 'back_to_search')]);
+    buttons.push([Markup.button.callback('Отмена', 'cancel')]);
+
+    await ctx.reply(
+      `Найдено (${matches.length}):\n` +
+      `Выбери товар:`,
+      Markup.inlineKeyboard(buttons)
+    );
+    return;
+  }
+
+  // ===== ВВОД КОЛИЧЕСТВА =====
+  if (state.step === 'enter_quantity') {
+    // Парсим количество и единицу: "5", "5 кг", "5кг"
+    const match = text.match(/^([\d.,]+)\s*(кг|kg|г|g|л|l|шт|pcs)?$/i);
+
+    if (!match) {
+      return ctx.reply(
+        'Введи количество числом.\nПример: `5` или `5 кг`',
+        { parse_mode: 'Markdown' }
+      );
+    }
+
+    const amount = parseFloat(match[1].replace(',', '.'));
+    if (isNaN(amount) || amount <= 0) {
+      return ctx.reply('Количество должно быть больше 0');
+    }
+
+    let unit = (match[2] || state.selectedProduct.mainUnit || 'кг').toLowerCase();
+    const unitMap = { 'kg': 'кг', 'g': 'г', 'l': 'л', 'pcs': 'шт' };
+    unit = unitMap[unit] || unit;
+
+    // Добавляем позицию в список
+    const newItem = {
+      productId: state.selectedProduct.id,
+      name: state.selectedProduct.name,
+      amount,
+      unit
+    };
+
+    const items = [...(state.items || []), newItem];
+
+    setUserState(userId, {
+      ...state,
+      step: 'search_product',
+      items,
+      selectedProduct: null
+    });
+
+    // Формируем список добавленных позиций
+    const itemsList = items.map((item, i) =>
+      `${i + 1}. ${item.name} - ${item.amount} ${item.unit}`
+    ).join('\n');
+
+    await ctx.reply(
+      `✓ Добавлено: ${newItem.name} - ${amount} ${unit}\n\n` +
+      `Позиции (${items.length}):\n${itemsList}\n\n` +
+      `Введи название следующего товара или нажми "Готово":`,
       Markup.inlineKeyboard([
-        [Markup.button.callback('Списать в iiko', 'start_writeoff')]
+        [Markup.button.callback('✓ Готово - создать акт', 'finish_adding')],
+        [Markup.button.callback('Отмена', 'cancel')]
+      ])
+    );
+    return;
+  }
+
+  // ===== Если не в процессе =====
+  return ctx.reply(
+    'Используй /start или /writeoff чтобы начать списание.',
+    Markup.inlineKeyboard([
+      [Markup.button.callback('Списать в iiko', 'start_writeoff')]
+    ])
+  );
+});
+
+// ==================== CALLBACK: Выбор товара из поиска ====================
+bot.action(/^select_product:(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+
+  const productId = ctx.match[1];
+  const product = PRODUCTS.find(p => p.id === productId);
+  const state = getUserState(ctx.from.id);
+
+  if (!product) {
+    return ctx.editMessageText('Товар не найден. Попробуй поиск заново.');
+  }
+
+  // Сохраняем выбранный товар
+  setUserState(ctx.from.id, {
+    ...state,
+    step: 'enter_quantity',
+    selectedProduct: product
+  });
+
+  await ctx.editMessageText(
+    `Выбран: ${product.name}\n\n` +
+    `Введи количество (например: 5 или 5 кг):`,
+    Markup.inlineKeyboard([
+      [Markup.button.callback('« Назад к поиску', 'back_to_search')],
+      [Markup.button.callback('Отмена', 'cancel')]
+    ])
+  );
+});
+
+// ==================== CALLBACK: Назад к поиску ====================
+bot.action('back_to_search', async (ctx) => {
+  await ctx.answerCbQuery();
+
+  const state = getUserState(ctx.from.id);
+  const itemsCount = state.items?.length || 0;
+
+  setUserState(ctx.from.id, {
+    ...state,
+    step: 'search_product',
+    selectedProduct: null
+  });
+
+  let message = `Склад: ${state.storeName}\n`;
+  if (state.accountName) message += `Счёт: ${state.accountName}\n`;
+  message += `\nДобавлено позиций: ${itemsCount}\n\n`;
+  message += `Введи название товара для поиска:`;
+
+  const buttons = [[Markup.button.callback('Отмена', 'cancel')]];
+  if (itemsCount > 0) {
+    buttons.unshift([Markup.button.callback('✓ Готово - создать акт', 'finish_adding')]);
+  }
+
+  await ctx.editMessageText(message, Markup.inlineKeyboard(buttons));
+});
+
+// ==================== CALLBACK: Завершить добавление ====================
+bot.action('finish_adding', async (ctx) => {
+  await ctx.answerCbQuery();
+
+  const state = getUserState(ctx.from.id);
+  const items = state.items || [];
+
+  if (items.length === 0) {
+    return ctx.editMessageText(
+      'Нет добавленных позиций.\n\nВведи название товара для поиска:',
+      Markup.inlineKeyboard([
+        [Markup.button.callback('Отмена', 'cancel')]
       ])
     );
   }
 
-  const rawMessage = ctx.message.text;
-
-  // Парсим позиции
-  let parsedItems = iikoService.parseWriteoffItems(rawMessage);
-
-  if (parsedItems.length === 0) {
-    return ctx.reply(
-      'Не удалось распознать позиции.\n\n' +
-      'Используй формат: `название количество единица`\n' +
-      'Например: `помидор 5 кг; огурец 3 кг`',
-      { parse_mode: 'Markdown' }
-    );
-  }
-
-  // Сопоставляем с номенклатурой iiko
-  if (PRODUCTS.length > 0) {
-    parsedItems = matchItemsToProducts(parsedItems);
-  }
-
-  // Проверяем на ошибки парсинга
-  const errorItems = parsedItems.filter(item => item.parseError);
-  const unmatchedItems = parsedItems.filter(item => !item.parseError && !item.productId);
-  let warningText = '';
-
-  if (errorItems.length > 0) {
-    warningText += '\n\nНе удалось распознать:\n' +
-      errorItems.map(item => `- ${item.name}`).join('\n');
-  }
-
-  if (unmatchedItems.length > 0 && PRODUCTS.length > 0) {
-    warningText += '\n\nНе найдены в номенклатуре iiko:\n' +
-      unmatchedItems.map(item => `- ${item.name}`).join('\n');
-  }
-
-  // Сохраняем распарсенные данные
-  setUserState(userId, {
+  // Переходим к подтверждению
+  setUserState(ctx.from.id, {
     ...state,
     step: 'confirm',
-    rawMessage,
-    parsedItems
+    parsedItems: items
   });
 
-  // Показываем подтверждение
-  const accountInfo = state.accountName ? `\nСчёт: ${state.accountName}` : '';
-  const hasUnmatched = unmatchedItems.length > 0 && PRODUCTS.length > 0;
+  const itemsList = items.map((item, i) =>
+    `${i + 1}. ${item.name} - ${item.amount} ${item.unit}`
+  ).join('\n');
 
-  await ctx.reply(
-    `Склад: ${state.storeName}${accountInfo}\n\n` +
-    `Позиции для списания:\n${formatItems(parsedItems, PRODUCTS.length > 0)}` +
-    warningText +
-    (hasUnmatched ? '\n\n⚠️ Товары без ID не будут списаны в iiko!' : '') +
-    '\n\nПодтвердить списание?',
+  await ctx.editMessageText(
+    `Склад: ${state.storeName}\n` +
+    `Счёт: ${state.accountName || '-'}\n\n` +
+    `Позиции для списания (${items.length}):\n${itemsList}\n\n` +
+    `Подтвердить списание?`,
     Markup.inlineKeyboard([
-      [Markup.button.callback('Подтвердить', 'confirm_writeoff')],
-      [Markup.button.callback('Изменить', 'edit_items')],
+      [Markup.button.callback('✓ Подтвердить', 'confirm_writeoff')],
+      [Markup.button.callback('+ Добавить ещё', 'back_to_search')],
       [Markup.button.callback('Отмена', 'cancel')]
     ])
   );
@@ -445,13 +560,18 @@ bot.action('confirm_writeoff', async (ctx) => {
   }
 
   try {
+    // Формируем rawMessage из items для лога
+    const rawMessage = state.parsedItems.map(item =>
+      `${item.name} ${item.amount} ${item.unit}`
+    ).join('; ');
+
     // 1. Логируем в Google Sheets
     const rowIndex = await sheetsService.appendWriteoffRow({
       storeId: state.storeId,
       storeName: state.storeName,
       accountId: state.accountId,
       accountName: state.accountName,
-      rawMessage: state.rawMessage,
+      rawMessage: rawMessage,
       parsedItems: state.parsedItems,
       telegramId: userId
     });
@@ -563,23 +683,23 @@ bot.action('edit_items', async (ctx) => {
     return ctx.editMessageText('Ошибка. Начни заново с /writeoff');
   }
 
+  // Сбрасываем позиции и возвращаемся к поиску
   setUserState(userId, {
     ...state,
-    step: 'waiting_items',
-    rawMessage: null,
-    parsedItems: null
+    step: 'search_product',
+    items: [],
+    parsedItems: null,
+    selectedProduct: null
   });
 
   await ctx.editMessageText(
-    `Склад: ${state.storeName}\n\n` +
-    'Отправь новый список позиций для списания.\n\n' +
-    'Формат: `помидор 5 кг; огурец 3 кг`',
-    {
-      parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback('Отмена', 'cancel')]
-      ])
-    }
+    `Склад: ${state.storeName}\n` +
+    `Счёт: ${state.accountName || '-'}\n\n` +
+    `Добавлено позиций: 0\n\n` +
+    `Введи название товара для поиска:`,
+    Markup.inlineKeyboard([
+      [Markup.button.callback('Отмена', 'cancel')]
+    ])
   );
 });
 
