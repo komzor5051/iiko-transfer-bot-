@@ -961,16 +961,20 @@ async function sendDailyReport() {
   }
 }
 
-// Крон-задача: каждый день в 21:30 по Новосибирску (UTC+7)
-// 21:30 NSK = 14:30 UTC
-cron.schedule('30 14 * * *', () => {
+// Крон-задача: каждый день в 21:30 по Новосибирску
+cron.schedule('30 21 * * *', async () => {
   console.log('Running daily report cron job...');
-  sendDailyReport();
+  try {
+    await sendDailyReport();
+    console.log('Daily report cron job completed successfully');
+  } catch (error) {
+    console.error('Daily report cron job failed:', error.message);
+  }
 }, {
-  timezone: 'UTC'
+  timezone: 'Asia/Novosibirsk'
 });
 
-console.log('Daily report scheduled for 21:30 Novosibirsk time');
+console.log('Daily report scheduled for 21:30 Novosibirsk time (Asia/Novosibirsk)');
 
 // ==================== GRACEFUL SHUTDOWN ====================
 process.once('SIGINT', () => {
