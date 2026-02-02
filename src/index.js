@@ -62,7 +62,20 @@ async function loadIikoReferences() {
     // Продолжаем работу без счетов
   }
 
-  // Номенклатуру загружаем по требованию (она большая)
+  // Загружаем номенклатуру для сопоставления товаров
+  try {
+    const products = await iikoService.getProducts();
+    PRODUCTS = products.map(p => ({
+      id: p.id,
+      name: p.name || '',
+      code: p.code || '',
+      num: p.num || ''
+    }));
+    console.log(`Loaded ${PRODUCTS.length} products`);
+  } catch (error) {
+    console.warn('Warning: Could not load products:', error.message);
+    // Продолжаем работу без номенклатуры
+  }
 
   return success && STORES.length > 0;
 }
@@ -96,13 +109,60 @@ function clearUserState(userId) {
 /**
  * Форматировать список позиций для отображения
  */
-function formatItems(items) {
+function formatItems(items, showMatched = false) {
   return items.map((item, i) => {
     if (item.parseError) {
       return `${i + 1}. ${item.name} (не распознано)`;
     }
-    return `${i + 1}. ${item.name} - ${item.amount} ${item.unit}`;
+    let line = `${i + 1}. ${item.name} - ${item.amount} ${item.unit}`;
+    if (showMatched) {
+      if (item.productId) {
+        line += ` ✓`;
+      } else {
+        line += ` (не найден в iiko)`;
+      }
+    }
+    return line;
   }).join('\n');
+}
+
+/**
+ * Сопоставить названия товаров с номенклатурой iiko
+ * Возвращает items с заполненными productId
+ */
+function matchItemsToProducts(items) {
+  return items.map(item => {
+    if (item.parseError) return item;
+
+    const searchName = item.name.toLowerCase().trim();
+
+    // Ищем точное совпадение
+    let product = PRODUCTS.find(p =>
+      p.name.toLowerCase() === searchName
+    );
+
+    // Если не найдено - ищем частичное совпадение
+    if (!product) {
+      product = PRODUCTS.find(p =>
+        p.name.toLowerCase().includes(searchName) ||
+        searchName.includes(p.name.toLowerCase())
+      );
+    }
+
+    // Если не найдено - ищем по коду
+    if (!product) {
+      product = PRODUCTS.find(p =>
+        p.code?.toLowerCase() === searchName ||
+        p.num?.toLowerCase() === searchName
+      );
+    }
+
+    return {
+      ...item,
+      productId: product?.id || null,
+      matchedName: product?.name || null
+    };
+  });
 }
 
 // ==================== КОМАНДА /start ====================
@@ -158,7 +218,8 @@ bot.command('refresh', async (ctx) => {
     await ctx.reply(
       `Справочники обновлены:\n` +
       `- Складов: ${STORES.length}\n` +
-      `- Расходных счетов: ${EXPENSE_ACCOUNTS.length}`
+      `- Расходных счетов: ${EXPENSE_ACCOUNTS.length}\n` +
+      `- Товаров: ${PRODUCTS.length}`
     );
   } else {
     await ctx.reply('Ошибка обновления справочников. Проверь подключение к iiko.');
@@ -314,7 +375,7 @@ bot.on('text', async (ctx) => {
   const rawMessage = ctx.message.text;
 
   // Парсим позиции
-  const parsedItems = iikoService.parseWriteoffItems(rawMessage);
+  let parsedItems = iikoService.parseWriteoffItems(rawMessage);
 
   if (parsedItems.length === 0) {
     return ctx.reply(
@@ -325,13 +386,24 @@ bot.on('text', async (ctx) => {
     );
   }
 
+  // Сопоставляем с номенклатурой iiko
+  if (PRODUCTS.length > 0) {
+    parsedItems = matchItemsToProducts(parsedItems);
+  }
+
   // Проверяем на ошибки парсинга
   const errorItems = parsedItems.filter(item => item.parseError);
+  const unmatchedItems = parsedItems.filter(item => !item.parseError && !item.productId);
   let warningText = '';
 
   if (errorItems.length > 0) {
-    warningText = '\n\nНе удалось распознать:\n' +
+    warningText += '\n\nНе удалось распознать:\n' +
       errorItems.map(item => `- ${item.name}`).join('\n');
+  }
+
+  if (unmatchedItems.length > 0 && PRODUCTS.length > 0) {
+    warningText += '\n\nНе найдены в номенклатуре iiko:\n' +
+      unmatchedItems.map(item => `- ${item.name}`).join('\n');
   }
 
   // Сохраняем распарсенные данные
@@ -344,11 +416,13 @@ bot.on('text', async (ctx) => {
 
   // Показываем подтверждение
   const accountInfo = state.accountName ? `\nСчёт: ${state.accountName}` : '';
+  const hasUnmatched = unmatchedItems.length > 0 && PRODUCTS.length > 0;
 
   await ctx.reply(
     `Склад: ${state.storeName}${accountInfo}\n\n` +
-    `Позиции для списания:\n${formatItems(parsedItems)}` +
+    `Позиции для списания:\n${formatItems(parsedItems, PRODUCTS.length > 0)}` +
     warningText +
+    (hasUnmatched ? '\n\n⚠️ Товары без ID не будут списаны в iiko!' : '') +
     '\n\nПодтвердить списание?',
     Markup.inlineKeyboard([
       [Markup.button.callback('Подтвердить', 'confirm_writeoff')],
@@ -382,11 +456,29 @@ bot.action('confirm_writeoff', async (ctx) => {
     });
 
     // 2. Отправляем в iiko Server API
-    const validItems = state.parsedItems.filter(item => !item.parseError);
+    // Берем только товары с productId (успешно сопоставленные)
+    const validItems = state.parsedItems.filter(item => !item.parseError && item.productId);
 
     // Проверяем наличие accountId
     if (!state.accountId) {
       throw new Error('Не выбран расходный счёт. Начните заново.');
+    }
+
+    // Если нет ни одного сопоставленного товара
+    if (validItems.length === 0) {
+      await sheetsService.updateWriteoffRow(rowIndex, {
+        status: 'IIKO_ERROR',
+        errorMessage: 'Ни один товар не найден в номенклатуре iiko'
+      });
+
+      return ctx.editMessageText(
+        'Ни один товар не найден в номенклатуре iiko.\n\n' +
+        'Проверь названия товаров и попробуй снова.',
+        Markup.inlineKeyboard([
+          [Markup.button.callback('Изменить', 'edit_items')],
+          [Markup.button.callback('В меню', 'back_to_menu')]
+        ])
+      );
     }
 
     const iikoResult = await iikoService.createWriteoffDocument({
@@ -404,14 +496,19 @@ bot.action('confirm_writeoff', async (ctx) => {
         status: 'IIKO_OK'
       });
 
+      const skippedItems = state.parsedItems.filter(item => !item.parseError && !item.productId);
       let successMessage = `Акт списания создан!\n\n` +
         `Склад: ${state.storeName}\n` +
         `Счёт: ${state.accountName || '-'}\n` +
         `Документ: ${iikoResult.documentNumber || iikoResult.documentId}\n\n` +
-        `Позиции:\n${formatItems(state.parsedItems)}`;
+        `Списано (${validItems.length}):\n${formatItems(validItems)}`;
+
+      if (skippedItems.length > 0) {
+        successMessage += `\n\nПропущено (не найдены в iiko):\n` +
+          skippedItems.map(item => `- ${item.name}`).join('\n');
+      }
 
       await ctx.editMessageText(successMessage, {
-        parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
           [Markup.button.callback('Новое списание', 'start_writeoff')],
           [Markup.button.callback('В меню', 'back_to_menu')]
@@ -603,6 +700,7 @@ async function start() {
       console.log('iiko references loaded successfully');
       console.log(`  Stores: ${STORES.length}`);
       console.log(`  Expense accounts: ${EXPENSE_ACCOUNTS.length}`);
+      console.log(`  Products: ${PRODUCTS.length}`);
     } else {
       console.warn('Warning: Could not load iiko references. Will retry on first request.');
     }

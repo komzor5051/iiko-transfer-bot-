@@ -14,6 +14,12 @@ npm start        # Run the bot
 npm run dev      # Run with nodemon (auto-restart on changes)
 ```
 
+### Bot Commands
+- `/start` — Main menu
+- `/writeoff` — Start writeoff flow
+- `/refresh` — Reload stores and accounts from iiko
+- `/help` — Show help
+
 ## Architecture
 
 ```
@@ -59,7 +65,10 @@ Session keys expire after ~15 minutes; `iikoService` handles automatic re-authen
 
 ### Google Sheets Structure
 
-Sheet "Writeoff Logs" columns: Timestamp, Store ID, Store Name, Account ID, Account Name, Raw Message, Parsed Items (JSON), Telegram ID, iiko Document ID, iiko Doc Number, Status, Error Message.
+Sheet "Writeoff Logs" columns (A-L):
+`Timestamp | Store ID | Store Name | Account ID | Account Name | Raw Message | Parsed Items (JSON) | Telegram ID | iiko Document ID | iiko Doc Number | Status | Error Message`
+
+Status values: `NEW` → `IIKO_OK` or `IIKO_ERROR`
 
 ## Environment Variables
 
@@ -75,3 +84,12 @@ Required in `.env`:
 
 Users send items as: `помидор 5 кг; огурец 3 кг` or one per line.
 Supported units: кг, kg, г, g, л, l, шт, pcs.
+
+### Product Matching
+
+Products are loaded from iiko at startup and cached in `PRODUCTS`. The `matchItemsToProducts()` function matches user input to iiko nomenclature by:
+1. Exact name match (case-insensitive)
+2. Partial name match (contains)
+3. Code/num match
+
+Items without a match are shown with warning and skipped when creating the writeoff document.
