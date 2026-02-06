@@ -81,24 +81,6 @@ function formatItemsList(items) {
   ).join('\n');
 }
 
-/**
- * Форматировать сообщение для группы
- */
-function formatGroupMessage(role, items, username) {
-  const roleLabel = role === 'kitchen' ? 'Кухня' : 'Склад';
-  const direction = role === 'kitchen'
-    ? 'Кухня запрашивает товары'
-    : 'Перемещение: Кухня -> Склад';
-
-  let message = `📦 ${direction}\n`;
-  message += `👤 ${username}\n\n`;
-  message += items.map((item, i) =>
-    `${i + 1}. ${item.name} — ${item.amount} ${item.unit}`
-  ).join('\n');
-
-  return message;
-}
-
 // ==================== КОМАНДА /start ====================
 bot.command('start', async (ctx) => {
   clearUserState(ctx.from.id);
@@ -473,15 +455,11 @@ bot.action('confirm_transfer', async (ctx) => {
 
     // 2. Выполняем действие в зависимости от роли
     if (state.role === 'kitchen') {
-      // Кухня: только сообщение в группу
-      const groupMessage = formatGroupMessage('kitchen', state.items, username);
-
-      await bot.telegram.sendMessage(TRANSFER_GROUP_ID, groupMessage);
-
+      // Кухня: логируем в Sheets
       await sheetsService.updateTransferRow(rowIndex, { status: 'SENT' });
 
       await ctx.editMessageText(
-        `Список отправлен в группу!\n\n` +
+        `Перемещение сохранено!\n\n` +
         `Роль: ${roleLabel}\n` +
         `Позиции (${state.items.length}):\n${formatItemsList(state.items)}`,
         Markup.inlineKeyboard([
@@ -514,12 +492,6 @@ bot.action('confirm_transfer', async (ctx) => {
       });
 
       if (iikoResult.success) {
-        // Отправляем сообщение в группу
-        const groupMessage = formatGroupMessage('warehouse', state.items, username) +
-          `\n\nДокумент iiko: ${iikoResult.documentNumber || iikoResult.documentId}`;
-
-        await bot.telegram.sendMessage(TRANSFER_GROUP_ID, groupMessage);
-
         await sheetsService.updateTransferRow(rowIndex, {
           iikoDocumentId: iikoResult.documentId,
           iikoDocumentNumber: iikoResult.documentNumber,
@@ -530,8 +502,7 @@ bot.action('confirm_transfer', async (ctx) => {
           `Перемещение создано!\n\n` +
           `Роль: ${roleLabel}\n` +
           `Документ iiko: ${iikoResult.documentNumber || iikoResult.documentId}\n\n` +
-          `Позиции (${state.items.length}):\n${formatItemsList(state.items)}\n\n` +
-          `Сообщение отправлено в группу.`,
+          `Позиции (${state.items.length}):\n${formatItemsList(state.items)}`,
           Markup.inlineKeyboard([
             [Markup.button.callback('Новое перемещение', 'back_to_menu')],
           ])
