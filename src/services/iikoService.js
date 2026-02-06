@@ -9,24 +9,20 @@ const xmlParser = new XMLParser({
 
 /**
  * Сервис для работы с iiko Server API (REST API v2)
- * Документация: https://ru.iiko.help/articles/api-documentations/akty-spisaniya
  */
 class IikoService {
   constructor(config) {
-    // iiko Server API
-    this.baseUrl = config.baseUrl; // https://shaurma-dzerzhinskogo-2-2.iiko.it:443/resto
+    this.baseUrl = config.baseUrl;
     this.login = config.login;
     this.password = config.password;
 
-    // Сессионный ключ
     this.sessionKey = null;
     this.sessionCreatedAt = null;
-    this.SESSION_LIFETIME = 900000; // 15 минут (iiko сессия живет ~15 мин)
+    this.SESSION_LIFETIME = 900000; // 15 минут
   }
 
   /**
    * Авторизация в iiko Server API
-   * GET /resto/api/auth?login={login}&pass={pass}
    */
   async authenticate() {
     try {
@@ -43,7 +39,6 @@ class IikoService {
         }
       );
 
-      // Ответ - просто ключ сессии в виде строки
       this.sessionKey = response.data;
       this.sessionCreatedAt = Date.now();
 
@@ -126,7 +121,6 @@ class IikoService {
     } catch (error) {
       const status = error.response?.status;
 
-      // 401/403 - сессия истекла
       if ((status === 401 || status === 403) && retryCount < maxRetries) {
         console.log('Session expired, re-authenticating...');
         this.sessionKey = null;
@@ -150,7 +144,6 @@ class IikoService {
 
   /**
    * Получить список складов
-   * GET /resto/api/corporation/stores
    */
   async getStores() {
     try {
@@ -165,7 +158,6 @@ class IikoService {
         }
       );
 
-      // iiko возвращает XML, парсим его
       const parsed = xmlParser.parse(response.data);
       const stores = parsed?.corporateItemDtoes?.corporateItemDto || [];
 
@@ -177,51 +169,7 @@ class IikoService {
   }
 
   /**
-   * Получить список расходных счетов (для актов списания)
-   * GET /resto/api/v2/entities/products/list - с фильтром по типу account
-   * или /resto/api/account/getAccountingCategories
-   */
-  async getExpenseAccounts() {
-    try {
-      const key = await this.ensureValidSession();
-
-      // Пробуем получить счета через v2 API
-      try {
-        const response = await axios.get(
-          `${this.baseUrl}/api/v2/entities/list`,
-          {
-            params: { key, rootType: 'Account' },
-            timeout: 15000
-          }
-        );
-
-        const accounts = response.data || [];
-        return Array.isArray(accounts) ? accounts : [accounts];
-      } catch (e1) {
-        // Если не работает, пробуем другой эндпоинт
-        console.log('Trying alternative endpoint for accounts...');
-
-        const response = await axios.get(
-          `${this.baseUrl}/api/account/getAccountingCategories`,
-          {
-            params: { key },
-            timeout: 15000
-          }
-        );
-
-        const accounts = response.data?.accountingCategoryDto || response.data || [];
-        return Array.isArray(accounts) ? accounts : [accounts];
-      }
-    } catch (error) {
-      console.error('Error getting expense accounts:', error.message);
-      // Возвращаем пустой массив вместо ошибки - счета опциональны
-      return [];
-    }
-  }
-
-  /**
    * Получить номенклатуру (товары)
-   * GET /resto/api/products
    */
   async getProducts() {
     try {
@@ -236,7 +184,6 @@ class IikoService {
         }
       );
 
-      // iiko возвращает XML, парсим его
       const parsed = xmlParser.parse(response.data);
       const products = parsed?.productDtoes?.productDto || [];
 
@@ -247,111 +194,45 @@ class IikoService {
     }
   }
 
-  /**
-   * Поиск товара по названию
-   */
-  async findProductByName(name) {
-    try {
-      const products = await this.getProducts();
-      const searchName = name.toLowerCase().trim();
-
-      // Ищем точное совпадение или частичное
-      return products.find(p =>
-        p.name?.toLowerCase() === searchName ||
-        p.name?.toLowerCase().includes(searchName)
-      );
-    } catch (error) {
-      console.error('Error finding product:', error.message);
-      return null;
-    }
-  }
-
-  // ============ АКТЫ СПИСАНИЯ ============
+  // ============ ПЕРЕМЕЩЕНИЯ ============
 
   /**
-   * Получить список актов списания за период
-   * GET /resto/api/v2/documents/writeoff
+   * Создать документ перемещения (internal transfer)
+   * POST /resto/api/v2/documents/outgoing
    *
-   * @param {string} dateFrom - Начало периода (yyyy-MM-dd)
-   * @param {string} dateTo - Конец периода (yyyy-MM-dd)
-   * @param {string} status - Статус документа (опционально)
-   */
-  async getWriteoffDocuments(dateFrom, dateTo, status = null) {
-    try {
-      const params = { dateFrom, dateTo };
-      if (status) params.status = status;
-
-      const response = await this.makeRequest('documents/writeoff', 'GET', null, params);
-
-      return response || [];
-    } catch (error) {
-      console.error('Error getting writeoff documents:', error.message);
-      throw error;
-    }
-  }
-
-  /**
-   * Получить акт списания по ID
-   * GET /resto/api/v2/documents/writeoff/byId
-   */
-  async getWriteoffById(id) {
-    try {
-      const response = await this.makeRequest('documents/writeoff/byId', 'GET', null, { id });
-
-      return response;
-    } catch (error) {
-      console.error('Error getting writeoff by id:', error.message);
-      throw error;
-    }
-  }
-
-  /**
-   * Создать акт списания
-   * POST /resto/api/v2/documents/writeoff
-   *
-   * @param {Object} params - Параметры документа
-   * @param {string} params.storeId - UUID склада (обязательно)
-   * @param {string} params.accountId - UUID расходного счета (обязательно)
-   * @param {Array} params.items - Позиции [{ productId, amount }] (обязательно)
+   * @param {Object} params
+   * @param {string} params.storeFrom - UUID склада-источника
+   * @param {string} params.storeTo - UUID склада-получателя
+   * @param {Array} params.items - Позиции [{ productId, amount }]
    * @param {string} params.comment - Комментарий
-   * @param {string} params.documentNumber - Номер документа (авто если не указан)
    */
-  async createWriteoffDocument({ storeId, accountId, items, comment = '', documentNumber = null }) {
+  async createTransferDocument({ storeFrom, storeTo, items, comment = '' }) {
     try {
-      console.log('Creating writeoff document...');
-      console.log('Store:', storeId);
-      console.log('Account:', accountId);
+      console.log('Creating transfer document...');
+      console.log('Store from:', storeFrom);
+      console.log('Store to:', storeTo);
       console.log('Items:', JSON.stringify(items, null, 2));
 
-      // Формируем дату в формате iiko
       const now = new Date();
-      const dateIncoming = now.toISOString().slice(0, 16); // "yyyy-MM-ddTHH:mm"
+      const dateIncoming = now.toISOString().slice(0, 16);
 
       const documentBody = {
         dateIncoming,
         status: 'NEW',
-        storeId,
-        comment: comment || `Списание от ${now.toLocaleDateString('ru-RU')}`,
-        items: items.map((item, index) => ({
+        storeFrom,
+        storeTo,
+        comment: comment || `Перемещение от ${now.toLocaleDateString('ru-RU')}`,
+        items: items.map(item => ({
           productId: item.productId,
           amount: item.amount
         }))
       };
 
-      // accountId опционален - добавляем только если указан
-      if (accountId) {
-        documentBody.accountId = accountId;
-      }
-
-      if (documentNumber) {
-        documentBody.documentNumber = documentNumber;
-      }
-
       console.log('Request body:', JSON.stringify(documentBody, null, 2));
 
-      const response = await this.makeRequest('documents/writeoff', 'POST', documentBody);
+      const response = await this.makeRequest('documents/outgoing', 'POST', documentBody);
 
-      console.log('Writeoff created:', JSON.stringify(response, null, 2));
+      console.log('Transfer created:', JSON.stringify(response, null, 2));
 
       return {
         success: response.result === 'SUCCESS',
@@ -361,7 +242,7 @@ class IikoService {
         response: response.response
       };
     } catch (error) {
-      console.error('Error creating writeoff document:', error.message);
+      console.error('Error creating transfer document:', error.message);
 
       return {
         success: false,
@@ -369,112 +250,6 @@ class IikoService {
         error: error.message
       };
     }
-  }
-
-  /**
-   * Провести акт списания (изменить статус на PROCESSED)
-   */
-  async processWriteoffDocument(documentId) {
-    try {
-      // Получаем текущий документ
-      const doc = await this.getWriteoffById(documentId);
-
-      if (!doc) {
-        throw new Error('Document not found');
-      }
-
-      // Обновляем статус
-      const documentBody = {
-        ...doc,
-        id: documentId,
-        status: 'PROCESSED'
-      };
-
-      const response = await this.makeRequest('documents/writeoff', 'POST', documentBody);
-
-      return {
-        success: response.result === 'SUCCESS',
-        errors: response.errors || []
-      };
-    } catch (error) {
-      console.error('Error processing writeoff document:', error.message);
-
-      return {
-        success: false,
-        error: error.message
-      };
-    }
-  }
-
-  /**
-   * Парсинг текста с позициями для списания
-   * Формат: "помидор 5 кг; огурец 3 кг; курица филе 10 кг"
-   *
-   * @param {string} text - Текст от пользователя
-   * @returns {Array} - Массив распарсенных позиций
-   */
-  parseWriteoffItems(text) {
-    if (!text || typeof text !== 'string') {
-      return [];
-    }
-
-    const items = [];
-
-    // Разделяем по ; или переносу строки
-    const parts = text.split(/[;\n]+/).map(p => p.trim()).filter(Boolean);
-
-    for (const part of parts) {
-      // Ищем число и единицу измерения в конце строки
-      // Примеры: "помидор 5 кг", "курица филе 10.5 kg", "масло 2л", "сыр 1.5кг"
-      // \s* после числа позволяет писать без пробела: "5кг"
-      const match = part.match(/^(.+?)\s+([\d.,]+)\s*(кг|kg|г|g|л|l|шт|pcs)?$/i);
-
-      if (match) {
-        const name = match[1].trim();
-        const amount = parseFloat(match[2].replace(',', '.'));
-        let unit = (match[3] || 'кг').toLowerCase();
-
-        // Нормализуем единицы
-        const unitMap = {
-          'kg': 'кг',
-          'g': 'г',
-          'l': 'л',
-          'pcs': 'шт'
-        };
-        unit = unitMap[unit] || unit;
-
-        if (name && !isNaN(amount) && amount > 0) {
-          items.push({
-            name,
-            amount,
-            unit,
-            productId: null
-          });
-        } else {
-          // Regex совпал, но количество <= 0 или невалидное
-          items.push({
-            name: name || part,
-            amount: amount || 0,
-            unit,
-            productId: null,
-            parseError: true,
-            errorReason: amount <= 0 ? 'Количество должно быть больше 0' : 'Невалидные данные'
-          });
-        }
-      } else {
-        // Если не удалось распарсить, добавляем как есть для ручной обработки
-        items.push({
-          name: part,
-          amount: 0,
-          unit: 'кг',
-          productId: null,
-          parseError: true,
-          errorReason: 'Не распознан формат'
-        });
-      }
-    }
-
-    return items;
   }
 }
 

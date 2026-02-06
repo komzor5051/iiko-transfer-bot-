@@ -2,28 +2,25 @@ const { google } = require('googleapis');
 
 /**
  * Сервис для работы с Google Sheets API
- * Журнал операций списания
+ * Журнал перемещений
  *
- * Структура листа "Writeoff Logs":
- * A: timestamp        - Дата и время создания
- * B: store_id         - ID склада
- * C: store_name       - Название склада
- * D: account_id       - ID расходного счета
- * E: account_name     - Название расходного счета
- * F: raw_message      - Исходное сообщение от кладовщика
- * G: parsed_items     - Распарсенные позиции (JSON)
- * H: telegram_id      - Telegram ID кладовщика
- * I: iiko_document_id - ID документа в iiko
- * J: iiko_doc_number  - Номер документа в iiko
- * K: status           - Статус: NEW, IIKO_OK, IIKO_ERROR
- * L: error_message    - Сообщение об ошибке (если есть)
+ * Структура листа "Transfer Logs":
+ * A: timestamp        - Дата и время
+ * B: role             - Роль (Кухня / Склад)
+ * C: items_json       - Позиции (JSON)
+ * D: telegram_id      - Telegram ID пользователя
+ * E: username         - Username пользователя
+ * F: iiko_document_id - ID документа в iiko (только для Склада)
+ * G: iiko_doc_number  - Номер документа в iiko
+ * H: status           - Статус: NEW, IIKO_OK, IIKO_ERROR, SENT
+ * I: error_message    - Сообщение об ошибке
+ * J: raw_text         - Сводный текст позиций
  */
 class GoogleSheetsService {
   constructor(serviceAccountJson, spreadsheetId) {
     this.spreadsheetId = spreadsheetId;
-    this.sheetName = 'Writeoff Logs';
+    this.sheetName = 'Transfer Logs';
 
-    // Инициализация Google Auth
     this.auth = new google.auth.GoogleAuth({
       credentials: serviceAccountJson,
       scopes: ['https://www.googleapis.com/auth/spreadsheets']
@@ -33,7 +30,7 @@ class GoogleSheetsService {
   }
 
   /**
-   * Инициализация листа с заголовками (если нужно)
+   * Инициализация листа с заголовками
    */
   async ensureSheetExists() {
     try {
@@ -46,7 +43,6 @@ class GoogleSheetsService {
       );
 
       if (!sheetExists) {
-        // Создаем лист
         await this.sheets.spreadsheets.batchUpdate({
           spreadsheetId: this.spreadsheetId,
           resource: {
@@ -58,25 +54,22 @@ class GoogleSheetsService {
           }
         });
 
-        // Добавляем заголовки
         await this.sheets.spreadsheets.values.update({
           spreadsheetId: this.spreadsheetId,
-          range: `${this.sheetName}!A1:L1`,
+          range: `${this.sheetName}!A1:J1`,
           valueInputOption: 'USER_ENTERED',
           resource: {
             values: [[
               'Timestamp',
-              'Store ID',
-              'Store Name',
-              'Account ID',
-              'Account Name',
-              'Raw Message',
-              'Parsed Items',
+              'Role',
+              'Items (JSON)',
               'Telegram ID',
+              'Username',
               'iiko Document ID',
               'iiko Doc Number',
               'Status',
-              'Error Message'
+              'Error Message',
+              'Raw Text'
             ]]
           }
         });
@@ -90,19 +83,16 @@ class GoogleSheetsService {
   }
 
   /**
-   * Добавить запись о списании
-   * @param {Object} payload - Данные списания
+   * Добавить запись о перемещении
    * @returns {Promise<number>} - Индекс добавленной строки
    */
-  async appendWriteoffRow(payload) {
+  async appendTransferRow(payload) {
     const {
-      storeId,
-      storeName,
-      accountId,
-      accountName,
-      rawMessage,
-      parsedItems,
-      telegramId
+      role,
+      items,
+      telegramId,
+      username,
+      rawText
     } = payload;
 
     const timestamp = new Date().toLocaleString('ru-RU', {
@@ -117,80 +107,71 @@ class GoogleSheetsService {
 
     const values = [
       timestamp,                              // A: timestamp
-      storeId || '',                          // B: store_id
-      storeName || '',                        // C: store_name
-      accountId || '',                        // D: account_id
-      accountName || '',                      // E: account_name
-      rawMessage || '',                       // F: raw_message
-      JSON.stringify(parsedItems),            // G: parsed_items
-      String(telegramId),                     // H: telegram_id
-      '',                                     // I: iiko_document_id
-      '',                                     // J: iiko_doc_number
-      'NEW',                                  // K: status
-      ''                                      // L: error_message
+      role || '',                             // B: role
+      JSON.stringify(items),                  // C: items_json
+      String(telegramId),                     // D: telegram_id
+      username || '',                         // E: username
+      '',                                     // F: iiko_document_id
+      '',                                     // G: iiko_doc_number
+      'NEW',                                  // H: status
+      '',                                     // I: error_message
+      rawText || ''                           // J: raw_text
     ];
 
     try {
       const response = await this.sheets.spreadsheets.values.append({
         spreadsheetId: this.spreadsheetId,
-        range: `${this.sheetName}!A:L`,
+        range: `${this.sheetName}!A:J`,
         valueInputOption: 'USER_ENTERED',
         resource: { values: [values] }
       });
 
-      // Извлекаем номер строки из ответа
       const updatedRange = response.data.updates.updatedRange;
       const match = updatedRange.match(/!A(\d+):/);
       const rowIndex = match ? parseInt(match[1]) : null;
 
-      console.log(`Writeoff logged at row ${rowIndex}`);
+      console.log(`Transfer logged at row ${rowIndex}`);
 
       return rowIndex;
     } catch (error) {
-      console.error('Error appending writeoff row:', error.message);
+      console.error('Error appending transfer row:', error.message);
       throw error;
     }
   }
 
   /**
-   * Обновить статус записи списания
-   * @param {number} rowIndex - Номер строки
-   * @param {Object} updates - Обновления { iikoDocumentId, iikoDocumentNumber, status, errorMessage }
+   * Обновить статус записи перемещения
    */
-  async updateWriteoffRow(rowIndex, updates) {
+  async updateTransferRow(rowIndex, updates) {
     const { iikoDocumentId, iikoDocumentNumber, status, errorMessage } = updates;
 
     try {
       const data = [];
 
-      // I: iiko_document_id
       if (iikoDocumentId !== undefined) {
         data.push({
-          range: `${this.sheetName}!I${rowIndex}`,
+          range: `${this.sheetName}!F${rowIndex}`,
           values: [[iikoDocumentId || '']]
         });
       }
 
-      // J: iiko_doc_number
       if (iikoDocumentNumber !== undefined) {
         data.push({
-          range: `${this.sheetName}!J${rowIndex}`,
+          range: `${this.sheetName}!G${rowIndex}`,
           values: [[iikoDocumentNumber || '']]
         });
       }
 
-      // K: status
       if (status !== undefined) {
         data.push({
-          range: `${this.sheetName}!K${rowIndex}`,
+          range: `${this.sheetName}!H${rowIndex}`,
           values: [[status]]
         });
       }
 
-      // L: error_message
       if (errorMessage !== undefined) {
         data.push({
-          range: `${this.sheetName}!L${rowIndex}`,
+          range: `${this.sheetName}!I${rowIndex}`,
           values: [[errorMessage || '']]
         });
       }
@@ -204,67 +185,63 @@ class GoogleSheetsService {
           }
         });
 
-        console.log(`Writeoff row ${rowIndex} updated: status=${status}`);
+        console.log(`Transfer row ${rowIndex} updated: status=${status}`);
       }
     } catch (error) {
-      console.error('Error updating writeoff row:', error.message);
+      console.error('Error updating transfer row:', error.message);
       throw error;
     }
   }
 
   /**
-   * Получить последние записи списания для пользователя
-   * @param {number} telegramId - Telegram ID
-   * @param {number} limit - Количество записей
+   * Получить последние перемещения пользователя
    */
-  async getRecentWriteoffs(telegramId, limit = 5) {
+  async getRecentTransfers(telegramId, limit = 5) {
     try {
       const response = await this.sheets.spreadsheets.values.get({
         spreadsheetId: this.spreadsheetId,
-        range: `${this.sheetName}!A2:L1000`,
+        range: `${this.sheetName}!A2:J1000`,
         valueRenderOption: 'FORMATTED_VALUE'
       });
 
       const rows = response.data.values || [];
       const telegramIdStr = String(telegramId);
 
-      // Фильтруем по telegram_id (колонка H, индекс 7) и берем последние
+      // Фильтруем по telegram_id (колонка D, индекс 3)
       const userRows = rows
-        .filter(row => row[7] === telegramIdStr)
+        .filter(row => row[3] === telegramIdStr)
         .slice(-limit)
         .reverse();
 
       return userRows.map(row => ({
         timestamp: row[0],          // A
-        storeName: row[2],          // C
-        accountName: row[4],        // E
-        rawMessage: row[5],         // F
-        iikoDocumentId: row[8],     // I
-        iikoDocNumber: row[9],      // J
-        status: row[10],            // K
-        errorMessage: row[11]       // L
+        role: row[1],               // B
+        itemsJson: row[2],          // C
+        iikoDocumentId: row[5],     // F
+        iikoDocNumber: row[6],      // G
+        status: row[7],             // H
+        errorMessage: row[8],       // I
+        rawText: row[9]             // J
       }));
     } catch (error) {
-      console.error('Error getting recent writeoffs:', error.message);
+      console.error('Error getting recent transfers:', error.message);
       return [];
     }
   }
 
   /**
-   * Получить все списания за сегодня (по времени Новосибирска)
-   * @returns {Promise<Object>} - Статистика за день
+   * Получить все перемещения за сегодня
    */
-  async getTodayWriteoffs() {
+  async getTodayTransfers() {
     try {
       const response = await this.sheets.spreadsheets.values.get({
         spreadsheetId: this.spreadsheetId,
-        range: `${this.sheetName}!A2:L10000`,
+        range: `${this.sheetName}!A2:J10000`,
         valueRenderOption: 'FORMATTED_VALUE'
       });
 
       const rows = response.data.values || [];
 
-      // Получаем сегодняшнюю дату по Новосибирску
       const today = new Date().toLocaleDateString('ru-RU', {
         timeZone: 'Asia/Novosibirsk',
         day: '2-digit',
@@ -272,47 +249,38 @@ class GoogleSheetsService {
         year: 'numeric'
       });
 
-      // Фильтруем записи за сегодня (timestamp в колонке A начинается с даты)
       const todayRows = rows.filter(row => {
         const timestamp = row[0] || '';
         return timestamp.startsWith(today);
       });
 
-      // Считаем статистику
       const stats = {
         total: todayRows.length,
         success: 0,
         errors: 0,
         pending: 0,
-        byStore: {},
-        byAccount: {},
+        byRole: { 'Кухня': 0, 'Склад': 0 },
         items: []
       };
 
       for (const row of todayRows) {
-        const storeName = row[2] || 'Неизвестный склад';
-        const accountName = row[4] || 'Без счёта';
-        const status = row[10] || 'NEW';
-        const rawMessage = row[5] || '';
-        const docNumber = row[9] || '';
+        const role = row[1] || 'Неизвестно';
+        const status = row[7] || 'NEW';
+        const rawText = row[9] || '';
+        const docNumber = row[6] || '';
 
-        // Считаем статусы
-        if (status === 'IIKO_OK') stats.success++;
+        if (status === 'IIKO_OK' || status === 'SENT') stats.success++;
         else if (status === 'IIKO_ERROR') stats.errors++;
         else stats.pending++;
 
-        // Группируем по складам
-        stats.byStore[storeName] = (stats.byStore[storeName] || 0) + 1;
+        if (stats.byRole[role] !== undefined) {
+          stats.byRole[role]++;
+        }
 
-        // Группируем по счетам
-        stats.byAccount[accountName] = (stats.byAccount[accountName] || 0) + 1;
-
-        // Добавляем в список
         stats.items.push({
           timestamp: row[0],
-          storeName,
-          accountName,
-          rawMessage,
+          role,
+          rawText,
           status,
           docNumber
         });
@@ -320,8 +288,8 @@ class GoogleSheetsService {
 
       return stats;
     } catch (error) {
-      console.error('Error getting today writeoffs:', error.message);
-      return { total: 0, success: 0, errors: 0, pending: 0, byStore: {}, byAccount: {}, items: [] };
+      console.error('Error getting today transfers:', error.message);
+      return { total: 0, success: 0, errors: 0, pending: 0, byRole: { 'Кухня': 0, 'Склад': 0 }, items: [] };
     }
   }
 }

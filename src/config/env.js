@@ -49,10 +49,12 @@ module.exports = {
     password: process.env.IIKO_PASSWORD || ''
   },
 
-  // Legacy Cloud API (если понадобится)
-  iikoApiKey: process.env.IIKO_API_KEY,
-  iikoBaseUrl: process.env.IIKO_API_BASE_URL || 'https://api-ru.iiko.services',
-  iikoOrganizationId: process.env.IIKO_ORGANIZATION_ID || '',
+  // Склады для перемещений
+  kitchenStoreId: process.env.KITCHEN_STORE_ID || '',
+  warehouseStoreId: process.env.WAREHOUSE_STORE_ID || '',
+
+  // Telegram группа для уведомлений о перемещениях
+  transferGroupId: process.env.TRANSFER_GROUP_ID ? Number(process.env.TRANSFER_GROUP_ID) : null,
 
   // Environment
   nodeEnv: process.env.NODE_ENV || 'development'

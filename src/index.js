@@ -5,10 +5,14 @@ const cron = require('node-cron');
 const GoogleSheetsService = require('./services/googleSheetsService');
 const IikoService = require('./services/iikoService');
 
-// ID группы для ежедневных отчётов
-const REPORT_GROUP_ID = -5237107467;
+// ID группы для уведомлений о перемещениях
+const TRANSFER_GROUP_ID = config.transferGroupId || -5237107467;
 
-console.log('Starting iiko Writeoff Bot...');
+// UUID складов для перемещений
+const KITCHEN_STORE_ID = config.kitchenStoreId;
+const WAREHOUSE_STORE_ID = config.warehouseStoreId;
+
+console.log('Starting Transfer Bot...');
 console.log(`Environment: ${config.nodeEnv}`);
 
 // ==================== ИНИЦИАЛИЗАЦИЯ СЕРВИСОВ ====================
@@ -18,7 +22,6 @@ const sheetsService = new GoogleSheetsService(
 );
 console.log('Google Sheets service initialized');
 
-// iiko Server API (REST API v2)
 const iikoService = new IikoService({
   baseUrl: config.iiko.baseUrl,
   login: config.iiko.login,
@@ -27,46 +30,14 @@ const iikoService = new IikoService({
 console.log('iiko Server API service initialized');
 console.log(`iiko URL: ${config.iiko.baseUrl}`);
 
-// ==================== КЭШИ СПРАВОЧНИКОВ iiko ====================
-// Загружаются при старте и по запросу
-let STORES = [];           // Список складов
-let EXPENSE_ACCOUNTS = []; // Расходные счета
-let PRODUCTS = [];         // Номенклатура (кэш)
+// ==================== КЭШ НОМЕНКЛАТУРЫ ====================
+let PRODUCTS = [];
 
 /**
- * Загрузить справочники из iiko
+ * Загрузить номенклатуру из iiko
  */
-async function loadIikoReferences() {
-  console.log('Loading iiko references...');
-  let success = true;
-
-  // Загружаем склады
-  try {
-    const stores = await iikoService.getStores();
-    STORES = stores.map(s => ({
-      id: s.id,
-      name: s.name || s.code || `Склад ${s.id?.slice(0, 8)}`
-    }));
-    console.log(`Loaded ${STORES.length} stores`);
-  } catch (error) {
-    console.error('Error loading stores:', error.message);
-    success = false;
-  }
-
-  // Загружаем расходные счета (опционально)
-  try {
-    const accounts = await iikoService.getExpenseAccounts();
-    EXPENSE_ACCOUNTS = accounts.map(a => ({
-      id: a.id,
-      name: a.name || a.code || `Счёт ${a.id?.slice(0, 8)}`
-    }));
-    console.log(`Loaded ${EXPENSE_ACCOUNTS.length} expense accounts`);
-  } catch (error) {
-    console.warn('Warning: Could not load expense accounts:', error.message);
-    // Продолжаем работу без счетов
-  }
-
-  // Загружаем номенклатуру для сопоставления товаров
+async function loadProducts() {
+  console.log('Loading products from iiko...');
   try {
     const products = await iikoService.getProducts();
     PRODUCTS = products.map(p => ({
@@ -77,98 +48,55 @@ async function loadIikoReferences() {
       mainUnit: p.mainUnit || 'кг'
     }));
     console.log(`Loaded ${PRODUCTS.length} products`);
+    return true;
   } catch (error) {
     console.warn('Warning: Could not load products:', error.message);
-    // Продолжаем работу без номенклатуры
+    return false;
   }
-
-  return success && STORES.length > 0;
 }
 
-// Хранилище состояний пользователей (в памяти)
+// Хранилище состояний пользователей
 const userStates = new Map();
 
 // ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
-/**
- * Получить состояние пользователя
- */
 function getUserState(userId) {
   return userStates.get(userId) || { step: null };
 }
 
-/**
- * Установить состояние пользователя
- */
 function setUserState(userId, state) {
   userStates.set(userId, { ...getUserState(userId), ...state });
 }
 
-/**
- * Очистить состояние пользователя
- */
 function clearUserState(userId) {
   userStates.delete(userId);
 }
 
 /**
- * Форматировать список позиций для отображения
+ * Форматировать список позиций
  */
-function formatItems(items, showMatched = false) {
-  return items.map((item, i) => {
-    if (item.parseError) {
-      const reason = item.errorReason || 'не распознано';
-      return `${i + 1}. ${item.name} (${reason})`;
-    }
-    let line = `${i + 1}. ${item.name} - ${item.amount} ${item.unit}`;
-    if (showMatched) {
-      if (item.productId) {
-        line += ` ✓`;
-      } else {
-        line += ` (не найден в iiko)`;
-      }
-    }
-    return line;
-  }).join('\n');
+function formatItemsList(items) {
+  return items.map((item, i) =>
+    `${i + 1}. ${item.name} - ${item.amount} ${item.unit}`
+  ).join('\n');
 }
 
 /**
- * Сопоставить названия товаров с номенклатурой iiko
- * Возвращает items с заполненными productId
+ * Форматировать сообщение для группы
  */
-function matchItemsToProducts(items) {
-  return items.map(item => {
-    if (item.parseError) return item;
+function formatGroupMessage(role, items, username) {
+  const roleLabel = role === 'kitchen' ? 'Кухня' : 'Склад';
+  const direction = role === 'kitchen'
+    ? 'Кухня запрашивает товары'
+    : 'Перемещение: Кухня -> Склад';
 
-    const searchName = item.name.toLowerCase().trim();
+  let message = `📦 ${direction}\n`;
+  message += `👤 ${username}\n\n`;
+  message += items.map((item, i) =>
+    `${i + 1}. ${item.name} — ${item.amount} ${item.unit}`
+  ).join('\n');
 
-    // Ищем точное совпадение
-    let product = PRODUCTS.find(p =>
-      p.name.toLowerCase() === searchName
-    );
-
-    // Если не найдено - ищем частичное совпадение
-    if (!product) {
-      product = PRODUCTS.find(p =>
-        p.name.toLowerCase().includes(searchName) ||
-        searchName.includes(p.name.toLowerCase())
-      );
-    }
-
-    // Если не найдено - ищем по коду
-    if (!product) {
-      product = PRODUCTS.find(p =>
-        p.code?.toLowerCase() === searchName ||
-        p.num?.toLowerCase() === searchName
-      );
-    }
-
-    return {
-      ...item,
-      productId: product?.id || null,
-      matchedName: product?.name || null
-    };
-  });
+  return message;
 }
 
 // ==================== КОМАНДА /start ====================
@@ -176,175 +104,12 @@ bot.command('start', async (ctx) => {
   clearUserState(ctx.from.id);
 
   await ctx.reply(
-    'Привет! Я бот для списания товаров в iiko.\n\n' +
-    'Используй кнопку ниже, чтобы создать акт списания.',
+    'Привет! Я бот для перемещения товаров.\n\n' +
+    'Выбери свою роль:',
     Markup.inlineKeyboard([
-      [Markup.button.callback('Списать в iiko', 'start_writeoff')],
-      [Markup.button.callback('История списаний', 'history')]
-    ])
-  );
-});
-
-// ==================== КОМАНДА /writeoff ====================
-bot.command('writeoff', async (ctx) => {
-  clearUserState(ctx.from.id);
-
-  // Проверяем загружены ли справочники
-  if (STORES.length === 0) {
-    await ctx.reply('Загружаю данные из iiko...');
-    await loadIikoReferences();
-  }
-
-  if (STORES.length === 0) {
-    return ctx.reply(
-      'Не удалось загрузить склады из iiko.\n' +
-      'Проверь подключение и попробуй /writeoff ещё раз.'
-    );
-  }
-
-  // Показываем выбор склада
-  const storeButtons = STORES.slice(0, 10).map(store =>
-    [Markup.button.callback(store.name.substring(0, 30), `select_store:${store.id}`)]
-  );
-  storeButtons.push([Markup.button.callback('Отмена', 'cancel')]);
-
-  await ctx.reply(
-    'Выбери склад (откуда списываем):',
-    Markup.inlineKeyboard(storeButtons)
-  );
-});
-
-// ==================== КОМАНДА /refresh ====================
-bot.command('refresh', async (ctx) => {
-  await ctx.reply('Обновляю справочники из iiko...');
-
-  const success = await loadIikoReferences();
-
-  if (success) {
-    await ctx.reply(
-      `Справочники обновлены:\n` +
-      `- Складов: ${STORES.length}\n` +
-      `- Расходных счетов: ${EXPENSE_ACCOUNTS.length}\n` +
-      `- Товаров: ${PRODUCTS.length}`
-    );
-  } else {
-    await ctx.reply('Ошибка обновления справочников. Проверь подключение к iiko.');
-  }
-});
-
-// ==================== CALLBACK: Начать списание ====================
-bot.action('start_writeoff', async (ctx) => {
-  await ctx.answerCbQuery();
-  clearUserState(ctx.from.id);
-
-  // Проверяем загружены ли справочники
-  if (STORES.length === 0) {
-    await ctx.editMessageText('Загружаю данные из iiko...');
-    await loadIikoReferences();
-  }
-
-  if (STORES.length === 0) {
-    return ctx.editMessageText(
-      'Не удалось загрузить склады из iiko.\n' +
-      'Проверь подключение и попробуй ещё раз.',
-      Markup.inlineKeyboard([
-        [Markup.button.callback('Попробовать снова', 'start_writeoff')]
-      ])
-    );
-  }
-
-  const storeButtons = STORES.slice(0, 10).map(store =>
-    [Markup.button.callback(store.name.substring(0, 30), `select_store:${store.id}`)]
-  );
-  storeButtons.push([Markup.button.callback('Отмена', 'cancel')]);
-
-  await ctx.editMessageText(
-    'Выбери склад (откуда списываем):',
-    Markup.inlineKeyboard(storeButtons)
-  );
-});
-
-// ==================== CALLBACK: Выбор склада ====================
-bot.action(/^select_store:(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-
-  const storeId = ctx.match[1];
-  const store = STORES.find(s => s.id === storeId);
-
-  if (!store) {
-    return ctx.editMessageText('Склад не найден. Попробуй /start');
-  }
-
-  // Сохраняем выбранный склад
-  setUserState(ctx.from.id, {
-    step: 'select_account',
-    storeId: store.id,
-    storeName: store.name
-  });
-
-  // Показываем выбор расходного счета
-  if (EXPENSE_ACCOUNTS.length === 0) {
-    // Если счетов нет, пропускаем этот шаг и переходим к поиску товаров
-    setUserState(ctx.from.id, {
-      step: 'search_product',
-      storeId: store.id,
-      storeName: store.name,
-      accountId: null,
-      accountName: 'Не указан',
-      items: []
-    });
-
-    return ctx.editMessageText(
-      `Склад: ${store.name}\n\n` +
-      `Добавлено позиций: 0\n\n` +
-      `Введи название товара для поиска:`,
-      Markup.inlineKeyboard([
-        [Markup.button.callback('Отмена', 'cancel')]
-      ])
-    );
-  }
-
-  const accountButtons = EXPENSE_ACCOUNTS.slice(0, 10).map(acc =>
-    [Markup.button.callback(acc.name.substring(0, 30), `select_account:${acc.id}`)]
-  );
-  accountButtons.push([Markup.button.callback('Назад', 'start_writeoff')]);
-  accountButtons.push([Markup.button.callback('Отмена', 'cancel')]);
-
-  await ctx.editMessageText(
-    `Склад: ${store.name}\n\n` +
-    'Выбери расходный счёт (причина списания):',
-    Markup.inlineKeyboard(accountButtons)
-  );
-});
-
-// ==================== CALLBACK: Выбор расходного счёта ====================
-bot.action(/^select_account:(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-
-  const accountId = ctx.match[1];
-  const account = EXPENSE_ACCOUNTS.find(a => a.id === accountId);
-  const state = getUserState(ctx.from.id);
-
-  if (!account || !state.storeId) {
-    return ctx.editMessageText('Ошибка. Попробуй /writeoff заново.');
-  }
-
-  // Сохраняем выбранный счёт и переходим к поиску товаров
-  setUserState(ctx.from.id, {
-    ...state,
-    step: 'search_product',
-    accountId: account.id,
-    accountName: account.name,
-    items: [] // Список добавленных позиций
-  });
-
-  await ctx.editMessageText(
-    `Склад: ${state.storeName}\n` +
-    `Счёт: ${account.name}\n\n` +
-    `Добавлено позиций: 0\n\n` +
-    `Введи название товара для поиска:`,
-    Markup.inlineKeyboard([
-      [Markup.button.callback('Отмена', 'cancel')]
+      [Markup.button.callback('Кухня', 'role_kitchen')],
+      [Markup.button.callback('Склад', 'role_warehouse')],
+      [Markup.button.callback('История перемещений', 'history')]
     ])
   );
 });
@@ -352,22 +117,34 @@ bot.action(/^select_account:(.+)$/, async (ctx) => {
 // ==================== КОМАНДА /help ====================
 bot.command('help', (ctx) => {
   ctx.reply(
-    'Справка по боту списаний:\n\n' +
+    'Справка по боту перемещений:\n\n' +
     '/start - Главное меню\n' +
-    '/writeoff - Создать акт списания\n' +
-    '/refresh - Обновить справочники из iiko\n' +
+    '/refresh - Обновить номенклатуру из iiko\n' +
     '/report - Отправить отчёт за день\n' +
     '/help - Эта справка\n\n' +
     'Как использовать:\n' +
-    '1. Нажми "Списать в iiko"\n' +
-    '2. Выбери склад и счёт\n' +
-    '3. Введи название товара для поиска\n' +
-    '4. Выбери товар из списка\n' +
-    '5. Введи количество (например: 5 или 5 кг)\n' +
-    '6. Добавь ещё товары или нажми "Готово"\n' +
-    '7. Подтверди списание\n\n' +
-    'Данные сохраняются в журнал Google Sheets.'
+    '1. Нажми /start и выбери роль (Кухня или Склад)\n' +
+    '2. Введи название товара для поиска\n' +
+    '3. Выбери товар из списка\n' +
+    '4. Введи количество (например: 5 или 5 кг)\n' +
+    '5. Добавь ещё товары или нажми "Переместить"\n' +
+    '6. Подтверди перемещение\n\n' +
+    'Кухня: список отправляется в Telegram-группу\n' +
+    'Склад: создаётся документ перемещения в iiko + сообщение в группу'
   );
+});
+
+// ==================== КОМАНДА /refresh ====================
+bot.command('refresh', async (ctx) => {
+  await ctx.reply('Обновляю номенклатуру из iiko...');
+
+  const success = await loadProducts();
+
+  if (success) {
+    await ctx.reply(`Номенклатура обновлена: ${PRODUCTS.length} товаров`);
+  } else {
+    await ctx.reply('Ошибка обновления номенклатуры. Проверь подключение к iiko.');
+  }
 });
 
 // ==================== КОМАНДА /report ====================
@@ -375,12 +152,63 @@ bot.command('report', async (ctx) => {
   try {
     await ctx.reply('Формирую отчёт...');
     await sendDailyReport();
-    await ctx.reply('✅ Отчёт отправлен в группу.');
+    await ctx.reply('Отчёт отправлен в группу.');
   } catch (error) {
     console.error('Error in /report command:', error.message);
-    await ctx.reply(`❌ Ошибка при формировании отчёта: ${error.message}`);
+    await ctx.reply(`Ошибка при формировании отчёта: ${error.message}`);
   }
 });
+
+// ==================== CALLBACK: Выбор роли ====================
+bot.action('role_kitchen', async (ctx) => {
+  await ctx.answerCbQuery();
+  await startTransferFlow(ctx, 'kitchen');
+});
+
+bot.action('role_warehouse', async (ctx) => {
+  await ctx.answerCbQuery();
+  await startTransferFlow(ctx, 'warehouse');
+});
+
+/**
+ * Начать флоу перемещения для выбранной роли
+ */
+async function startTransferFlow(ctx, role) {
+  const userId = ctx.from.id;
+
+  // Проверяем загружены ли товары
+  if (PRODUCTS.length === 0) {
+    await ctx.editMessageText('Загружаю номенклатуру из iiko...');
+    await loadProducts();
+  }
+
+  if (PRODUCTS.length === 0) {
+    return ctx.editMessageText(
+      'Не удалось загрузить номенклатуру из iiko.\nПопробуй позже или нажми /refresh.',
+      Markup.inlineKeyboard([
+        [Markup.button.callback('Попробовать снова', role === 'kitchen' ? 'role_kitchen' : 'role_warehouse')],
+        [Markup.button.callback('В меню', 'back_to_menu')]
+      ])
+    );
+  }
+
+  const roleLabel = role === 'kitchen' ? 'Кухня' : 'Склад';
+
+  setUserState(userId, {
+    step: 'search_product',
+    role,
+    items: []
+  });
+
+  await ctx.editMessageText(
+    `Роль: ${roleLabel}\n` +
+    `Добавлено позиций: 0\n\n` +
+    `Введи название товара для поиска:`,
+    Markup.inlineKeyboard([
+      [Markup.button.callback('Отмена', 'cancel')]
+    ])
+  );
+}
 
 // ==================== ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ ====================
 bot.on('text', async (ctx) => {
@@ -388,14 +216,12 @@ bot.on('text', async (ctx) => {
   const state = getUserState(userId);
   const text = ctx.message.text.trim();
 
-  // Пропускаем команды - они обрабатываются выше
   if (text.startsWith('/')) {
     return;
   }
 
   // ===== ПОИСК ТОВАРА =====
   if (state.step === 'search_product') {
-    // Проверяем загружены ли товары
     if (PRODUCTS.length === 0) {
       return ctx.reply(
         'Номенклатура не загружена.\nИспользуй /refresh для обновления.',
@@ -409,11 +235,10 @@ bot.on('text', async (ctx) => {
       return ctx.reply('Введи минимум 2 символа для поиска');
     }
 
-    // Ищем товары по названию
     const searchLower = text.toLowerCase();
     const matches = PRODUCTS.filter(p =>
       p.name && p.name.toLowerCase().includes(searchLower)
-    ).slice(0, 8); // Максимум 8 результатов
+    ).slice(0, 8);
 
     if (matches.length === 0) {
       return ctx.reply(
@@ -424,19 +249,17 @@ bot.on('text', async (ctx) => {
       );
     }
 
-    // Показываем результаты поиска
     const buttons = matches.map(p =>
       [Markup.button.callback(
         p.name.substring(0, 35) + (p.name.length > 35 ? '...' : ''),
         `select_product:${p.id}`
       )]
     );
-    buttons.push([Markup.button.callback('« Искать другой', 'back_to_search')]);
+    buttons.push([Markup.button.callback('Искать другой', 'back_to_search')]);
     buttons.push([Markup.button.callback('Отмена', 'cancel')]);
 
     await ctx.reply(
-      `Найдено (${matches.length}):\n` +
-      `Выбери товар:`,
+      `Найдено (${matches.length}):\nВыбери товар:`,
       Markup.inlineKeyboard(buttons)
     );
     return;
@@ -444,7 +267,6 @@ bot.on('text', async (ctx) => {
 
   // ===== ВВОД КОЛИЧЕСТВА =====
   if (state.step === 'enter_quantity') {
-    // Парсим количество и единицу: "5", "5 кг", "5кг"
     const match = text.match(/^([\d.,]+)\s*(кг|kg|г|g|л|l|шт|pcs)?$/i);
 
     if (!match) {
@@ -463,7 +285,6 @@ bot.on('text', async (ctx) => {
     const unitMap = { 'kg': 'кг', 'g': 'г', 'l': 'л', 'pcs': 'шт' };
     unit = unitMap[unit] || unit;
 
-    // Добавляем позицию в список
     const newItem = {
       productId: state.selectedProduct.id,
       name: state.selectedProduct.name,
@@ -472,6 +293,7 @@ bot.on('text', async (ctx) => {
     };
 
     const items = [...(state.items || []), newItem];
+    const roleLabel = state.role === 'kitchen' ? 'Кухня' : 'Склад';
 
     setUserState(userId, {
       ...state,
@@ -480,17 +302,15 @@ bot.on('text', async (ctx) => {
       selectedProduct: null
     });
 
-    // Формируем список добавленных позиций
-    const itemsList = items.map((item, i) =>
-      `${i + 1}. ${item.name} - ${item.amount} ${item.unit}`
-    ).join('\n');
+    const itemsList = formatItemsList(items);
 
     await ctx.reply(
-      `✓ Добавлено: ${newItem.name} - ${amount} ${unit}\n\n` +
+      `Добавлено: ${newItem.name} - ${amount} ${unit}\n\n` +
+      `Роль: ${roleLabel}\n` +
       `Позиции (${items.length}):\n${itemsList}\n\n` +
-      `Введи название следующего товара или нажми "Готово":`,
+      `Введи название следующего товара или нажми "Переместить":`,
       Markup.inlineKeyboard([
-        [Markup.button.callback('✓ Готово - создать акт', 'finish_adding')],
+        [Markup.button.callback('Переместить', 'finish_adding')],
         [Markup.button.callback('Отмена', 'cancel')]
       ])
     );
@@ -499,14 +319,15 @@ bot.on('text', async (ctx) => {
 
   // ===== Если не в процессе =====
   return ctx.reply(
-    'Используй /start или /writeoff чтобы начать списание.',
+    'Используй /start чтобы начать перемещение.',
     Markup.inlineKeyboard([
-      [Markup.button.callback('Списать в iiko', 'start_writeoff')]
+      [Markup.button.callback('Кухня', 'role_kitchen')],
+      [Markup.button.callback('Склад', 'role_warehouse')]
     ])
   );
 });
 
-// ==================== CALLBACK: Выбор товара из поиска ====================
+// ==================== CALLBACK: Выбор товара ====================
 bot.action(/^select_product:(.+)$/, async (ctx) => {
   await ctx.answerCbQuery();
 
@@ -518,7 +339,6 @@ bot.action(/^select_product:(.+)$/, async (ctx) => {
     return ctx.editMessageText('Товар не найден. Попробуй поиск заново.');
   }
 
-  // Сохраняем выбранный товар
   setUserState(ctx.from.id, {
     ...state,
     step: 'enter_quantity',
@@ -529,7 +349,7 @@ bot.action(/^select_product:(.+)$/, async (ctx) => {
     `Выбран: ${product.name}\n\n` +
     `Введи количество (например: 5 или 5 кг):`,
     Markup.inlineKeyboard([
-      [Markup.button.callback('« Назад к поиску', 'back_to_search')],
+      [Markup.button.callback('Назад к поиску', 'back_to_search')],
       [Markup.button.callback('Отмена', 'cancel')]
     ])
   );
@@ -541,16 +361,17 @@ bot.action('back_to_search', async (ctx) => {
 
   const state = getUserState(ctx.from.id);
 
-  if (!state.storeName) {
+  if (!state.role) {
     return ctx.editMessageText(
       'Сессия истекла. Начни заново.',
       Markup.inlineKeyboard([
-        [Markup.button.callback('Начать заново', 'start_writeoff')]
+        [Markup.button.callback('В меню', 'back_to_menu')]
       ])
     );
   }
 
   const itemsCount = state.items?.length || 0;
+  const roleLabel = state.role === 'kitchen' ? 'Кухня' : 'Склад';
 
   setUserState(ctx.from.id, {
     ...state,
@@ -558,16 +379,13 @@ bot.action('back_to_search', async (ctx) => {
     selectedProduct: null
   });
 
-  let message = `Склад: ${state.storeName}\n`;
-  if (state.accountName && state.accountName !== 'Не указан') {
-    message += `Счёт: ${state.accountName}\n`;
-  }
-  message += `\nДобавлено позиций: ${itemsCount}\n\n`;
+  let message = `Роль: ${roleLabel}\n`;
+  message += `Добавлено позиций: ${itemsCount}\n\n`;
   message += `Введи название товара для поиска:`;
 
   const buttons = [[Markup.button.callback('Отмена', 'cancel')]];
   if (itemsCount > 0) {
-    buttons.unshift([Markup.button.callback('✓ Готово - создать акт', 'finish_adding')]);
+    buttons.unshift([Markup.button.callback('Переместить', 'finish_adding')]);
   }
 
   await ctx.editMessageText(message, Markup.inlineKeyboard(buttons));
@@ -579,11 +397,11 @@ bot.action('finish_adding', async (ctx) => {
 
   const state = getUserState(ctx.from.id);
 
-  if (!state.storeName) {
+  if (!state.role) {
     return ctx.editMessageText(
       'Сессия истекла. Начни заново.',
       Markup.inlineKeyboard([
-        [Markup.button.callback('Начать заново', 'start_writeoff')]
+        [Markup.button.callback('В меню', 'back_to_menu')]
       ])
     );
   }
@@ -599,142 +417,155 @@ bot.action('finish_adding', async (ctx) => {
     );
   }
 
-  // Переходим к подтверждению
   setUserState(ctx.from.id, {
     ...state,
-    step: 'confirm',
-    parsedItems: items
+    step: 'confirm'
   });
 
-  const itemsList = items.map((item, i) =>
-    `${i + 1}. ${item.name} - ${item.amount} ${item.unit}`
-  ).join('\n');
+  const roleLabel = state.role === 'kitchen' ? 'Кухня' : 'Склад';
+  const itemsList = formatItemsList(items);
+  const actionText = state.role === 'kitchen'
+    ? 'Список будет отправлен в группу.'
+    : 'Будет создан документ перемещения в iiko (Кухня -> Склад) + сообщение в группу.';
 
   await ctx.editMessageText(
-    `Склад: ${state.storeName}\n` +
-    `Счёт: ${state.accountName || '-'}\n\n` +
-    `Позиции для списания (${items.length}):\n${itemsList}\n\n` +
-    `Подтвердить списание?`,
+    `Роль: ${roleLabel}\n\n` +
+    `Позиции (${items.length}):\n${itemsList}\n\n` +
+    `${actionText}\n\n` +
+    `Подтвердить перемещение?`,
     Markup.inlineKeyboard([
-      [Markup.button.callback('✓ Подтвердить', 'confirm_writeoff')],
+      [Markup.button.callback('Переместить', 'confirm_transfer')],
       [Markup.button.callback('+ Добавить ещё', 'back_to_search')],
       [Markup.button.callback('Отмена', 'cancel')]
     ])
   );
 });
 
-// ==================== CALLBACK: Подтверждение списания ====================
-bot.action('confirm_writeoff', async (ctx) => {
-  await ctx.answerCbQuery('Создаю акт списания...');
+// ==================== CALLBACK: Подтверждение перемещения ====================
+bot.action('confirm_transfer', async (ctx) => {
+  await ctx.answerCbQuery('Выполняю перемещение...');
 
   const userId = ctx.from.id;
   const state = getUserState(userId);
 
-  if (state.step !== 'confirm' || !state.parsedItems) {
-    return ctx.editMessageText('Ошибка состояния. Начни заново с /writeoff');
+  if (state.step !== 'confirm' || !state.items || state.items.length === 0) {
+    return ctx.editMessageText('Ошибка состояния. Начни заново с /start');
   }
 
+  const username = ctx.from.username
+    ? `@${ctx.from.username}`
+    : `${ctx.from.first_name || ''} ${ctx.from.last_name || ''}`.trim() || String(userId);
+
+  const roleLabel = state.role === 'kitchen' ? 'Кухня' : 'Склад';
+  const rawText = state.items.map(item =>
+    `${item.name} ${item.amount} ${item.unit}`
+  ).join('; ');
+
   try {
-    // Формируем rawMessage из items для лога
-    const rawMessage = state.parsedItems.map(item =>
-      `${item.name} ${item.amount} ${item.unit}`
-    ).join('; ');
-
     // 1. Логируем в Google Sheets
-    const rowIndex = await sheetsService.appendWriteoffRow({
-      storeId: state.storeId,
-      storeName: state.storeName,
-      accountId: state.accountId,
-      accountName: state.accountName,
-      rawMessage: rawMessage,
-      parsedItems: state.parsedItems,
-      telegramId: userId
+    const rowIndex = await sheetsService.appendTransferRow({
+      role: roleLabel,
+      items: state.items,
+      telegramId: userId,
+      username,
+      rawText
     });
 
-    // 2. Отправляем в iiko Server API
-    // Берем только товары с productId (успешно сопоставленные)
-    const validItems = state.parsedItems.filter(item => !item.parseError && item.productId);
+    // 2. Выполняем действие в зависимости от роли
+    if (state.role === 'kitchen') {
+      // Кухня: только сообщение в группу
+      const groupMessage = formatGroupMessage('kitchen', state.items, username);
 
-    // Если нет ни одного сопоставленного товара
-    if (validItems.length === 0) {
-      await sheetsService.updateWriteoffRow(rowIndex, {
-        status: 'IIKO_ERROR',
-        errorMessage: 'Ни один товар не найден в номенклатуре iiko'
-      });
+      await bot.telegram.sendMessage(TRANSFER_GROUP_ID, groupMessage);
 
-      return ctx.editMessageText(
-        'Ни один товар не найден в номенклатуре iiko.\n\n' +
-        'Проверь названия товаров и попробуй снова.',
-        Markup.inlineKeyboard([
-          [Markup.button.callback('Изменить', 'edit_items')],
-          [Markup.button.callback('В меню', 'back_to_menu')]
-        ])
-      );
-    }
-
-    const iikoResult = await iikoService.createWriteoffDocument({
-      storeId: state.storeId,
-      accountId: state.accountId,
-      items: validItems,
-      comment: `Списание через Telegram. User: ${ctx.from.username || userId}`
-    });
-
-    // 3. Обновляем статус в Google Sheets
-    if (iikoResult.success) {
-      await sheetsService.updateWriteoffRow(rowIndex, {
-        iikoDocumentId: iikoResult.documentId,
-        iikoDocumentNumber: iikoResult.documentNumber,
-        status: 'IIKO_OK'
-      });
-
-      const skippedItems = state.parsedItems.filter(item => !item.parseError && !item.productId);
-      let successMessage = `Акт списания создан!\n\n` +
-        `Склад: ${state.storeName}\n` +
-        `Счёт: ${state.accountName || '-'}\n` +
-        `Документ: ${iikoResult.documentNumber || iikoResult.documentId}\n\n` +
-        `Списано (${validItems.length}):\n${formatItems(validItems)}`;
-
-      if (skippedItems.length > 0) {
-        successMessage += `\n\nПропущено (не найдены в iiko):\n` +
-          skippedItems.map(item => `- ${item.name}`).join('\n');
-      }
-
-      await ctx.editMessageText(successMessage, {
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback('Новое списание', 'start_writeoff')],
-          [Markup.button.callback('В меню', 'back_to_menu')]
-        ])
-      });
-
-    } else {
-      // Ошибка iiko
-      const errorMsg = iikoResult.errors?.join(', ') || iikoResult.error || 'Неизвестная ошибка';
-
-      await sheetsService.updateWriteoffRow(rowIndex, {
-        status: 'IIKO_ERROR',
-        errorMessage: errorMsg
-      });
+      await sheetsService.updateTransferRow(rowIndex, { status: 'SENT' });
 
       await ctx.editMessageText(
-        `Ошибка создания акта в iiko!\n\n` +
-        `Ошибка: ${errorMsg}\n\n` +
-        `Данные сохранены в журнал.`,
+        `Список отправлен в группу!\n\n` +
+        `Роль: ${roleLabel}\n` +
+        `Позиции (${state.items.length}):\n${formatItemsList(state.items)}`,
         Markup.inlineKeyboard([
-          [Markup.button.callback('Попробовать снова', 'retry_writeoff')],
-          [Markup.button.callback('В меню', 'back_to_menu')]
+          [Markup.button.callback('Новое перемещение', 'back_to_menu')],
         ])
       );
+
+    } else {
+      // Склад: документ в iiko + сообщение в группу
+      if (!KITCHEN_STORE_ID || !WAREHOUSE_STORE_ID) {
+        await sheetsService.updateTransferRow(rowIndex, {
+          status: 'IIKO_ERROR',
+          errorMessage: 'Не настроены KITCHEN_STORE_ID или WAREHOUSE_STORE_ID'
+        });
+
+        return ctx.editMessageText(
+          'Ошибка: не настроены UUID складов для перемещения.\n' +
+          'Обратись к администратору.',
+          Markup.inlineKeyboard([
+            [Markup.button.callback('В меню', 'back_to_menu')]
+          ])
+        );
+      }
+
+      const iikoResult = await iikoService.createTransferDocument({
+        storeFrom: KITCHEN_STORE_ID,
+        storeTo: WAREHOUSE_STORE_ID,
+        items: state.items,
+        comment: `Перемещение через Telegram. ${username}`
+      });
+
+      if (iikoResult.success) {
+        // Отправляем сообщение в группу
+        const groupMessage = formatGroupMessage('warehouse', state.items, username) +
+          `\n\nДокумент iiko: ${iikoResult.documentNumber || iikoResult.documentId}`;
+
+        await bot.telegram.sendMessage(TRANSFER_GROUP_ID, groupMessage);
+
+        await sheetsService.updateTransferRow(rowIndex, {
+          iikoDocumentId: iikoResult.documentId,
+          iikoDocumentNumber: iikoResult.documentNumber,
+          status: 'IIKO_OK'
+        });
+
+        await ctx.editMessageText(
+          `Перемещение создано!\n\n` +
+          `Роль: ${roleLabel}\n` +
+          `Документ iiko: ${iikoResult.documentNumber || iikoResult.documentId}\n\n` +
+          `Позиции (${state.items.length}):\n${formatItemsList(state.items)}\n\n` +
+          `Сообщение отправлено в группу.`,
+          Markup.inlineKeyboard([
+            [Markup.button.callback('Новое перемещение', 'back_to_menu')],
+          ])
+        );
+
+      } else {
+        const errorMsg = iikoResult.errors?.join(', ') || iikoResult.error || 'Неизвестная ошибка';
+
+        await sheetsService.updateTransferRow(rowIndex, {
+          status: 'IIKO_ERROR',
+          errorMessage: errorMsg
+        });
+
+        await ctx.editMessageText(
+          `Ошибка создания документа в iiko!\n\n` +
+          `Ошибка: ${errorMsg}\n\n` +
+          `Данные сохранены в журнал.`,
+          Markup.inlineKeyboard([
+            [Markup.button.callback('Попробовать снова', 'retry_transfer')],
+            [Markup.button.callback('В меню', 'back_to_menu')]
+          ])
+        );
+      }
     }
 
     clearUserState(userId);
 
   } catch (error) {
-    console.error('Error in confirm_writeoff:', error);
+    console.error('Error in confirm_transfer:', error);
 
     await ctx.editMessageText(
       `Произошла ошибка: ${error.message}\n\nПопробуй ещё раз.`,
       Markup.inlineKeyboard([
-        [Markup.button.callback('Начать заново', 'start_writeoff')]
+        [Markup.button.callback('В меню', 'back_to_menu')]
       ])
     );
 
@@ -742,104 +573,71 @@ bot.action('confirm_writeoff', async (ctx) => {
   }
 });
 
-// ==================== CALLBACK: Повторить списание ====================
-bot.action('retry_writeoff', async (ctx) => {
+// ==================== CALLBACK: Повторить перемещение ====================
+bot.action('retry_transfer', async (ctx) => {
   await ctx.answerCbQuery();
 
   const state = getUserState(ctx.from.id);
 
-  if (!state.parsedItems || state.parsedItems.length === 0) {
+  if (!state.items || state.items.length === 0) {
     return ctx.editMessageText(
       'Нет данных для повтора. Начни заново.',
       Markup.inlineKeyboard([
-        [Markup.button.callback('Начать заново', 'start_writeoff')]
+        [Markup.button.callback('В меню', 'back_to_menu')]
       ])
     );
   }
 
-  // Повторно отправляем в iiko
   setUserState(ctx.from.id, {
     ...state,
     step: 'confirm'
   });
 
-  const itemsList = state.parsedItems.map((item, i) =>
-    `${i + 1}. ${item.name} - ${item.amount} ${item.unit}`
-  ).join('\n');
+  const roleLabel = state.role === 'kitchen' ? 'Кухня' : 'Склад';
+  const itemsList = formatItemsList(state.items);
 
   await ctx.editMessageText(
     `Повторная попытка...\n\n` +
-    `Склад: ${state.storeName}\n` +
-    `Счёт: ${state.accountName || '-'}\n\n` +
-    `Позиции (${state.parsedItems.length}):\n${itemsList}\n\n` +
-    `Подтвердить списание?`,
+    `Роль: ${roleLabel}\n\n` +
+    `Позиции (${state.items.length}):\n${itemsList}\n\n` +
+    `Подтвердить перемещение?`,
     Markup.inlineKeyboard([
-      [Markup.button.callback('✓ Подтвердить', 'confirm_writeoff')],
+      [Markup.button.callback('Переместить', 'confirm_transfer')],
       [Markup.button.callback('Отмена', 'cancel')]
     ])
   );
 });
 
-// ==================== CALLBACK: Изменить позиции ====================
-bot.action('edit_items', async (ctx) => {
-  await ctx.answerCbQuery();
-
-  const userId = ctx.from.id;
-  const state = getUserState(userId);
-
-  if (!state.storeName) {
-    return ctx.editMessageText('Ошибка. Начни заново с /writeoff');
-  }
-
-  // Сбрасываем позиции и возвращаемся к поиску
-  setUserState(userId, {
-    ...state,
-    step: 'search_product',
-    items: [],
-    parsedItems: null,
-    selectedProduct: null
-  });
-
-  await ctx.editMessageText(
-    `Склад: ${state.storeName}\n` +
-    `Счёт: ${state.accountName || '-'}\n\n` +
-    `Добавлено позиций: 0\n\n` +
-    `Введи название товара для поиска:`,
-    Markup.inlineKeyboard([
-      [Markup.button.callback('Отмена', 'cancel')]
-    ])
-  );
-});
-
-// ==================== CALLBACK: История списаний ====================
+// ==================== CALLBACK: История перемещений ====================
 bot.action('history', async (ctx) => {
   await ctx.answerCbQuery();
 
   try {
-    const writeoffs = await sheetsService.getRecentWriteoffs(ctx.from.id, 5);
+    const transfers = await sheetsService.getRecentTransfers(ctx.from.id, 5);
 
-    if (writeoffs.length === 0) {
+    if (transfers.length === 0) {
       return ctx.editMessageText(
-        'У тебя пока нет списаний.',
+        'У тебя пока нет перемещений.',
         Markup.inlineKeyboard([
-          [Markup.button.callback('Создать списание', 'start_writeoff')],
+          [Markup.button.callback('Кухня', 'role_kitchen')],
+          [Markup.button.callback('Склад', 'role_warehouse')],
           [Markup.button.callback('В меню', 'back_to_menu')]
         ])
       );
     }
 
-    let historyText = 'Последние списания:\n\n';
+    let historyText = 'Последние перемещения:\n\n';
 
-    for (const w of writeoffs) {
-      const statusEmoji = w.status === 'IIKO_OK' ? '✅' : w.status === 'IIKO_ERROR' ? '❌' : '⏳';
-      historyText += `${statusEmoji} ${w.timestamp}\n`;
-      historyText += `Склад: ${w.storeName}\n`;
-      if (w.accountName) {
-        historyText += `Счёт: ${w.accountName}\n`;
+    for (const t of transfers) {
+      const statusEmoji = (t.status === 'IIKO_OK' || t.status === 'SENT') ? '✅' : t.status === 'IIKO_ERROR' ? '❌' : '⏳';
+      historyText += `${statusEmoji} ${t.timestamp}\n`;
+      historyText += `Роль: ${t.role}\n`;
+      const shortText = (t.rawText || '').substring(0, 50) + ((t.rawText?.length || 0) > 50 ? '...' : '');
+      if (shortText) {
+        historyText += `${shortText}\n`;
       }
-      historyText += `${w.rawMessage?.substring(0, 50) || ''}${(w.rawMessage?.length || 0) > 50 ? '...' : ''}\n`;
-      if (w.iikoDocNumber || w.iikoDocumentId) {
-        historyText += `Doc: ${w.iikoDocNumber || w.iikoDocumentId}\n`;
+      if (t.iikoDocNumber || t.iikoDocumentId) {
+        historyText += `Doc: ${t.iikoDocNumber || t.iikoDocumentId}\n`;
       }
       historyText += '\n';
     }
@@ -847,7 +645,8 @@ bot.action('history', async (ctx) => {
     await ctx.editMessageText(
       historyText,
       Markup.inlineKeyboard([
-        [Markup.button.callback('Новое списание', 'start_writeoff')],
+        [Markup.button.callback('Кухня', 'role_kitchen')],
+        [Markup.button.callback('Склад', 'role_warehouse')],
         [Markup.button.callback('В меню', 'back_to_menu')]
       ])
     );
@@ -866,7 +665,8 @@ bot.action('cancel', async (ctx) => {
   await ctx.editMessageText(
     'Действие отменено.',
     Markup.inlineKeyboard([
-      [Markup.button.callback('Списать в iiko', 'start_writeoff')],
+      [Markup.button.callback('Кухня', 'role_kitchen')],
+      [Markup.button.callback('Склад', 'role_warehouse')],
       [Markup.button.callback('В меню', 'back_to_menu')]
     ])
   );
@@ -878,26 +678,23 @@ bot.action('back_to_menu', async (ctx) => {
   clearUserState(ctx.from.id);
 
   await ctx.editMessageText(
-    'Главное меню.\n\nВыбери действие:',
+    'Главное меню.\n\nВыбери роль:',
     Markup.inlineKeyboard([
-      [Markup.button.callback('Списать в iiko', 'start_writeoff')],
-      [Markup.button.callback('История списаний', 'history')]
+      [Markup.button.callback('Кухня', 'role_kitchen')],
+      [Markup.button.callback('Склад', 'role_warehouse')],
+      [Markup.button.callback('История перемещений', 'history')]
     ])
   );
 });
 
 // ==================== ЕЖЕДНЕВНЫЙ ОТЧЁТ ====================
 
-/**
- * Отправить ежедневный отчёт в группу
- */
 async function sendDailyReport() {
   try {
     console.log('Generating daily report...');
 
-    const stats = await sheetsService.getTodayWriteoffs();
+    const stats = await sheetsService.getTodayTransfers();
 
-    // Формируем дату
     const today = new Date().toLocaleDateString('ru-RU', {
       timeZone: 'Asia/Novosibirsk',
       day: '2-digit',
@@ -905,55 +702,43 @@ async function sendDailyReport() {
       year: 'numeric'
     });
 
-    let message = `📊 Отчёт по списаниям за ${today}\n\n`;
+    let message = `Отчёт по перемещениям за ${today}\n\n`;
 
     if (stats.total === 0) {
-      message += `Списаний за сегодня не было.`;
+      message += `Перемещений за сегодня не было.`;
     } else {
-      // Общая статистика
-      message += `Всего списаний: ${stats.total}\n`;
-      message += `✅ Успешно: ${stats.success}\n`;
+      message += `Всего перемещений: ${stats.total}\n`;
+      message += `Успешно: ${stats.success}\n`;
       if (stats.errors > 0) {
-        message += `❌ Ошибок: ${stats.errors}\n`;
+        message += `Ошибок: ${stats.errors}\n`;
       }
       if (stats.pending > 0) {
-        message += `⏳ В обработке: ${stats.pending}\n`;
+        message += `В обработке: ${stats.pending}\n`;
       }
 
-      // По складам
-      if (Object.keys(stats.byStore).length > 0) {
-        message += `\n📦 По складам:\n`;
-        for (const [store, count] of Object.entries(stats.byStore)) {
-          message += `  • ${store}: ${count}\n`;
+      // По ролям
+      message += `\nПо ролям:\n`;
+      for (const [role, count] of Object.entries(stats.byRole)) {
+        if (count > 0) {
+          message += `  ${role}: ${count}\n`;
         }
       }
 
-      // По счетам
-      if (Object.keys(stats.byAccount).length > 1 || !stats.byAccount['Без счёта']) {
-        message += `\n📋 По счетам:\n`;
-        for (const [account, count] of Object.entries(stats.byAccount)) {
-          if (account !== 'Без счёта') {
-            message += `  • ${account}: ${count}\n`;
-          }
-        }
-      }
-
-      // Последние 5 списаний
+      // Последние 5 перемещений
       if (stats.items.length > 0) {
-        message += `\n📝 Последние списания:\n`;
+        message += `\nПоследние перемещения:\n`;
         const lastItems = stats.items.slice(-5).reverse();
         for (const item of lastItems) {
-          const statusIcon = item.status === 'IIKO_OK' ? '✅' : item.status === 'IIKO_ERROR' ? '❌' : '⏳';
-          const shortMsg = item.rawMessage.length > 40
-            ? item.rawMessage.substring(0, 40) + '...'
-            : item.rawMessage;
-          message += `${statusIcon} ${item.storeName}: ${shortMsg}\n`;
+          const statusIcon = (item.status === 'IIKO_OK' || item.status === 'SENT') ? '✅' : item.status === 'IIKO_ERROR' ? '❌' : '⏳';
+          const shortMsg = item.rawText.length > 40
+            ? item.rawText.substring(0, 40) + '...'
+            : item.rawText;
+          message += `${statusIcon} [${item.role}] ${shortMsg}\n`;
         }
       }
     }
 
-    // Отправляем в группу
-    await bot.telegram.sendMessage(REPORT_GROUP_ID, message);
+    await bot.telegram.sendMessage(TRANSFER_GROUP_ID, message);
     console.log('Daily report sent to group');
 
   } catch (error) {
@@ -990,29 +775,35 @@ process.once('SIGTERM', () => {
 // ==================== ЗАПУСК БОТА ====================
 async function start() {
   try {
-    // Инициализируем лист Google Sheets
     await sheetsService.ensureSheetExists();
     console.log('Google Sheets ready');
 
-    // Загружаем справочники из iiko
     console.log('Connecting to iiko Server API...');
-    const iikoLoaded = await loadIikoReferences();
+    const productsLoaded = await loadProducts();
 
-    if (iikoLoaded) {
+    if (productsLoaded) {
       console.log('iiko references loaded successfully');
-      console.log(`  Stores: ${STORES.length}`);
-      console.log(`  Expense accounts: ${EXPENSE_ACCOUNTS.length}`);
       console.log(`  Products: ${PRODUCTS.length}`);
     } else {
-      console.warn('Warning: Could not load iiko references. Will retry on first request.');
+      console.warn('Warning: Could not load products. Will retry on first request.');
     }
 
-    // Запускаем бота
+    if (KITCHEN_STORE_ID) {
+      console.log(`Kitchen store ID: ${KITCHEN_STORE_ID}`);
+    } else {
+      console.warn('Warning: KITCHEN_STORE_ID not set');
+    }
+
+    if (WAREHOUSE_STORE_ID) {
+      console.log(`Warehouse store ID: ${WAREHOUSE_STORE_ID}`);
+    } else {
+      console.warn('Warning: WAREHOUSE_STORE_ID not set');
+    }
+
     bot.launch().then(() => {
       console.log('Bot polling started');
     });
 
-    // Даём время на подключение
     await new Promise(resolve => setTimeout(resolve, 2000));
 
     console.log('Bot started successfully!');
