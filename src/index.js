@@ -28,7 +28,41 @@ const iikoService = new IikoService({
   password: config.iiko.password
 });
 console.log('iiko Server API service initialized');
-console.log(`iiko URL: ${config.iiko.baseUrl}`);
+
+// ==================== КАТАЛОГ ТОВАРОВ ПО КАТЕГОРИЯМ ====================
+const CATALOG = [
+  {
+    name: 'Овощи',
+    products: [
+      'Лук красный', 'Халапеньо', 'Огурцы', 'Помидоры',
+      'Картофель фри с/м', 'Лимоны'
+    ]
+  },
+  {
+    name: 'Бакалея',
+    products: ['Сахар', 'Соль', 'Сахар в стиках 5 г', 'Уксус столовый 9%']
+  },
+  {
+    name: 'Прочее',
+    products: ['Вода 19 л', 'Масло фритюрное', 'Лаваш стандартный']
+  },
+  {
+    name: 'Соуса',
+    products: ['Копченый', 'Фирменный соус']
+  },
+  {
+    name: 'Молочка/мясо',
+    products: ['Молоко', 'Сырный продукт', 'Люля куриный', 'Бедро куриное п/ф', 'Наггетсы']
+  },
+  {
+    name: 'Морсы 0,33',
+    products: ['Вишня', 'Апельсин', 'Яблоко']
+  },
+  {
+    name: 'Чаи',
+    products: ['Чай/кофе', 'Кофе в зернах', 'Чай зеленый', 'Чай черный Грин Филд']
+  }
+];
 
 // ==================== КЭШ НОМЕНКЛАТУРЫ ====================
 let PRODUCTS = [];
@@ -55,6 +89,23 @@ async function loadProducts() {
   }
 }
 
+/**
+ * Найти товар в iiko по названию из каталога
+ */
+function findProductInIiko(catalogName) {
+  const search = catalogName.toLowerCase().trim();
+
+  // Точное совпадение
+  let product = PRODUCTS.find(p => p.name.toLowerCase() === search);
+  if (product) return product;
+
+  // Частичное совпадение
+  product = PRODUCTS.find(p =>
+    p.name.toLowerCase().includes(search) || search.includes(p.name.toLowerCase())
+  );
+  return product || null;
+}
+
 // Хранилище состояний пользователей
 const userStates = new Map();
 
@@ -72,18 +123,12 @@ function clearUserState(userId) {
   userStates.delete(userId);
 }
 
-/**
- * Форматировать список позиций
- */
 function formatItemsList(items) {
   return items.map((item, i) =>
     `${i + 1}. ${item.name} - ${item.amount} ${item.unit}`
   ).join('\n');
 }
 
-/**
- * Форматировать сообщение для группы
- */
 function formatGroupMessage(role, items, username) {
   const direction = role === 'kitchen'
     ? 'Кухня запрашивает товары'
@@ -96,6 +141,20 @@ function formatGroupMessage(role, items, username) {
   ).join('\n');
 
   return message;
+}
+
+/**
+ * Показать список категорий
+ */
+function getCategoriesKeyboard(itemsCount) {
+  const buttons = CATALOG.map((cat, i) =>
+    [Markup.button.callback(cat.name, `cat:${i}`)]
+  );
+  if (itemsCount > 0) {
+    buttons.push([Markup.button.callback(`Переместить (${itemsCount})`, 'finish_adding')]);
+  }
+  buttons.push([Markup.button.callback('Отмена', 'cancel')]);
+  return Markup.inlineKeyboard(buttons);
 }
 
 // ==================== КОМАНДА /start ====================
@@ -123,11 +182,10 @@ bot.command('help', (ctx) => {
     '/help - Эта справка\n\n' +
     'Как использовать:\n' +
     '1. Нажми /start и выбери роль (Кухня или Склад)\n' +
-    '2. Введи название товара для поиска\n' +
+    '2. Выбери категорию товаров\n' +
     '3. Выбери товар из списка\n' +
     '4. Введи количество (например: 5 или 5 кг)\n' +
-    '5. Добавь ещё товары или нажми "Переместить"\n' +
-    '6. Подтверди перемещение\n\n' +
+    '5. Нажми "Добавить ещё" или "Переместить"\n\n' +
     'Кухня: список отправляется в Telegram-группу\n' +
     'Склад: создаётся документ перемещения в iiko + сообщение в группу'
   );
@@ -136,9 +194,7 @@ bot.command('help', (ctx) => {
 // ==================== КОМАНДА /refresh ====================
 bot.command('refresh', async (ctx) => {
   await ctx.reply('Обновляю номенклатуру из iiko...');
-
   const success = await loadProducts();
-
   if (success) {
     await ctx.reply(`Номенклатура обновлена: ${PRODUCTS.length} товаров`);
   } else {
@@ -169,13 +225,9 @@ bot.action('role_warehouse', async (ctx) => {
   await startTransferFlow(ctx, 'warehouse');
 });
 
-/**
- * Начать флоу перемещения для выбранной роли
- */
 async function startTransferFlow(ctx, role) {
   const userId = ctx.from.id;
 
-  // Проверяем загружены ли товары
   if (PRODUCTS.length === 0) {
     await ctx.editMessageText('Загружаю номенклатуру из iiko...');
     await loadProducts();
@@ -183,7 +235,7 @@ async function startTransferFlow(ctx, role) {
 
   if (PRODUCTS.length === 0) {
     return ctx.editMessageText(
-      'Не удалось загрузить номенклатуру из iiko.\nПопробуй позже или нажми /refresh.',
+      'Не удалось загрузить номенклатуру из iiko.\nНажми /refresh.',
       Markup.inlineKeyboard([
         [Markup.button.callback('Попробовать снова', role === 'kitchen' ? 'role_kitchen' : 'role_warehouse')],
         [Markup.button.callback('В меню', 'back_to_menu')]
@@ -194,20 +246,79 @@ async function startTransferFlow(ctx, role) {
   const roleLabel = role === 'kitchen' ? 'Кухня' : 'Склад';
 
   setUserState(userId, {
-    step: 'search_product',
+    step: 'select_category',
     role,
     items: []
   });
 
   await ctx.editMessageText(
-    `Роль: ${roleLabel}\n` +
-    `Добавлено позиций: 0\n\n` +
-    `Введи название товара для поиска:`,
+    `Роль: ${roleLabel}\nДобавлено: 0\n\nВыбери категорию:`,
+    getCategoriesKeyboard(0)
+  );
+}
+
+// ==================== CALLBACK: Выбор категории ====================
+bot.action(/^cat:(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+
+  const catIndex = parseInt(ctx.match[1]);
+  const category = CATALOG[catIndex];
+  const state = getUserState(ctx.from.id);
+
+  if (!category || !state.role) {
+    return ctx.editMessageText('Ошибка. Начни заново /start');
+  }
+
+  const buttons = category.products.map((name, i) =>
+    [Markup.button.callback(name, `prod:${catIndex}:${i}`)]
+  );
+  buttons.push([Markup.button.callback('« Назад к категориям', 'back_to_cats')]);
+
+  await ctx.editMessageText(
+    `${category.name}:\n\nВыбери товар:`,
+    Markup.inlineKeyboard(buttons)
+  );
+});
+
+// ==================== CALLBACK: Выбор товара ====================
+bot.action(/^prod:(\d+):(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+
+  const catIndex = parseInt(ctx.match[1]);
+  const prodIndex = parseInt(ctx.match[2]);
+  const category = CATALOG[catIndex];
+  const state = getUserState(ctx.from.id);
+
+  if (!category || !category.products[prodIndex] || !state.role) {
+    return ctx.editMessageText('Ошибка. Начни заново /start');
+  }
+
+  const catalogName = category.products[prodIndex];
+  const iikoProduct = findProductInIiko(catalogName);
+
+  setUserState(ctx.from.id, {
+    ...state,
+    step: 'enter_quantity',
+    selectedProduct: {
+      id: iikoProduct?.id || null,
+      name: catalogName,
+      mainUnit: iikoProduct?.mainUnit || 'кг'
+    }
+  });
+
+  let msg = `Выбран: ${catalogName}`;
+  if (!iikoProduct) {
+    msg += `\n(не найден в iiko — будет записан только в журнал)`;
+  }
+  msg += `\n\nВведи количество (например: 5 или 5 кг):`;
+
+  await ctx.editMessageText(msg,
     Markup.inlineKeyboard([
+      [Markup.button.callback('« Назад', `cat:${catIndex}`)],
       [Markup.button.callback('Отмена', 'cancel')]
     ])
   );
-}
+});
 
 // ==================== ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ ====================
 bot.on('text', async (ctx) => {
@@ -215,63 +326,15 @@ bot.on('text', async (ctx) => {
   const state = getUserState(userId);
   const text = ctx.message.text.trim();
 
-  if (text.startsWith('/')) {
-    return;
-  }
-
-  // ===== ПОИСК ТОВАРА =====
-  if (state.step === 'search_product') {
-    if (PRODUCTS.length === 0) {
-      return ctx.reply(
-        'Номенклатура не загружена.\nИспользуй /refresh для обновления.',
-        Markup.inlineKeyboard([
-          [Markup.button.callback('Отмена', 'cancel')]
-        ])
-      );
-    }
-
-    if (text.length < 2) {
-      return ctx.reply('Введи минимум 2 символа для поиска');
-    }
-
-    const searchLower = text.toLowerCase();
-    const matches = PRODUCTS.filter(p =>
-      p.name && p.name.toLowerCase().includes(searchLower)
-    ).slice(0, 8);
-
-    if (matches.length === 0) {
-      return ctx.reply(
-        `Товар "${text}" не найден.\n\nПопробуй другое название:`,
-        Markup.inlineKeyboard([
-          [Markup.button.callback('Отмена', 'cancel')]
-        ])
-      );
-    }
-
-    const buttons = matches.map(p =>
-      [Markup.button.callback(
-        p.name.substring(0, 35) + (p.name.length > 35 ? '...' : ''),
-        `select_product:${p.id}`
-      )]
-    );
-    buttons.push([Markup.button.callback('Искать другой', 'back_to_search')]);
-    buttons.push([Markup.button.callback('Отмена', 'cancel')]);
-
-    await ctx.reply(
-      `Найдено (${matches.length}):\nВыбери товар:`,
-      Markup.inlineKeyboard(buttons)
-    );
-    return;
-  }
+  if (text.startsWith('/')) return;
 
   // ===== ВВОД КОЛИЧЕСТВА =====
   if (state.step === 'enter_quantity') {
-    const match = text.match(/^([\d.,]+)\s*(кг|kg|г|g|л|l|шт|pcs)?$/i);
+    const match = text.match(/^([\d.,]+)\s*(кг|kg|г|g|л|l|шт|pcs|порц)?$/i);
 
     if (!match) {
       return ctx.reply(
-        'Введи количество числом.\nПример: `5` или `5 кг`',
-        { parse_mode: 'Markdown' }
+        'Введи количество числом.\nПример: 5 или 5 кг',
       );
     }
 
@@ -296,7 +359,7 @@ bot.on('text', async (ctx) => {
 
     setUserState(userId, {
       ...state,
-      step: 'search_product',
+      step: 'select_category',
       items,
       selectedProduct: null
     });
@@ -306,10 +369,10 @@ bot.on('text', async (ctx) => {
     await ctx.reply(
       `Добавлено: ${newItem.name} - ${amount} ${unit}\n\n` +
       `Роль: ${roleLabel}\n` +
-      `Позиции (${items.length}):\n${itemsList}\n\n` +
-      `Введи название следующего товара или нажми "Переместить":`,
+      `Позиции (${items.length}):\n${itemsList}`,
       Markup.inlineKeyboard([
-        [Markup.button.callback('Переместить', 'finish_adding')],
+        [Markup.button.callback(`Переместить (${items.length})`, 'finish_adding')],
+        [Markup.button.callback('Добавить ещё', 'back_to_cats')],
         [Markup.button.callback('Отмена', 'cancel')]
       ])
     );
@@ -318,7 +381,7 @@ bot.on('text', async (ctx) => {
 
   // ===== Если не в процессе =====
   return ctx.reply(
-    'Используй /start чтобы начать перемещение.',
+    'Используй /start чтобы начать.',
     Markup.inlineKeyboard([
       [Markup.button.callback('Кухня', 'role_kitchen')],
       [Markup.button.callback('Склад', 'role_warehouse')]
@@ -326,36 +389,8 @@ bot.on('text', async (ctx) => {
   );
 });
 
-// ==================== CALLBACK: Выбор товара ====================
-bot.action(/^select_product:(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-
-  const productId = ctx.match[1];
-  const product = PRODUCTS.find(p => p.id === productId);
-  const state = getUserState(ctx.from.id);
-
-  if (!product) {
-    return ctx.editMessageText('Товар не найден. Попробуй поиск заново.');
-  }
-
-  setUserState(ctx.from.id, {
-    ...state,
-    step: 'enter_quantity',
-    selectedProduct: product
-  });
-
-  await ctx.editMessageText(
-    `Выбран: ${product.name}\n\n` +
-    `Введи количество (например: 5 или 5 кг):`,
-    Markup.inlineKeyboard([
-      [Markup.button.callback('Назад к поиску', 'back_to_search')],
-      [Markup.button.callback('Отмена', 'cancel')]
-    ])
-  );
-});
-
-// ==================== CALLBACK: Назад к поиску ====================
-bot.action('back_to_search', async (ctx) => {
+// ==================== CALLBACK: Назад к категориям ====================
+bot.action('back_to_cats', async (ctx) => {
   await ctx.answerCbQuery();
 
   const state = getUserState(ctx.from.id);
@@ -363,9 +398,7 @@ bot.action('back_to_search', async (ctx) => {
   if (!state.role) {
     return ctx.editMessageText(
       'Сессия истекла. Начни заново.',
-      Markup.inlineKeyboard([
-        [Markup.button.callback('В меню', 'back_to_menu')]
-      ])
+      Markup.inlineKeyboard([[Markup.button.callback('В меню', 'back_to_menu')]])
     );
   }
 
@@ -374,20 +407,14 @@ bot.action('back_to_search', async (ctx) => {
 
   setUserState(ctx.from.id, {
     ...state,
-    step: 'search_product',
+    step: 'select_category',
     selectedProduct: null
   });
 
-  let message = `Роль: ${roleLabel}\n`;
-  message += `Добавлено позиций: ${itemsCount}\n\n`;
-  message += `Введи название товара для поиска:`;
-
-  const buttons = [[Markup.button.callback('Отмена', 'cancel')]];
-  if (itemsCount > 0) {
-    buttons.unshift([Markup.button.callback('Переместить', 'finish_adding')]);
-  }
-
-  await ctx.editMessageText(message, Markup.inlineKeyboard(buttons));
+  await ctx.editMessageText(
+    `Роль: ${roleLabel}\nДобавлено: ${itemsCount}\n\nВыбери категорию:`,
+    getCategoriesKeyboard(itemsCount)
+  );
 });
 
 // ==================== CALLBACK: Завершить добавление ====================
@@ -399,9 +426,7 @@ bot.action('finish_adding', async (ctx) => {
   if (!state.role) {
     return ctx.editMessageText(
       'Сессия истекла. Начни заново.',
-      Markup.inlineKeyboard([
-        [Markup.button.callback('В меню', 'back_to_menu')]
-      ])
+      Markup.inlineKeyboard([[Markup.button.callback('В меню', 'back_to_menu')]])
     );
   }
 
@@ -409,32 +434,26 @@ bot.action('finish_adding', async (ctx) => {
 
   if (items.length === 0) {
     return ctx.editMessageText(
-      'Нет добавленных позиций.\n\nВведи название товара для поиска:',
-      Markup.inlineKeyboard([
-        [Markup.button.callback('Отмена', 'cancel')]
-      ])
+      'Нет добавленных позиций.\n\nВыбери категорию:',
+      getCategoriesKeyboard(0)
     );
   }
 
-  setUserState(ctx.from.id, {
-    ...state,
-    step: 'confirm'
-  });
+  setUserState(ctx.from.id, { ...state, step: 'confirm' });
 
   const roleLabel = state.role === 'kitchen' ? 'Кухня' : 'Склад';
   const itemsList = formatItemsList(items);
   const actionText = state.role === 'kitchen'
     ? 'Список будет отправлен в группу.'
-    : 'Будет создан документ перемещения в iiko (Кухня -> Склад) + сообщение в группу.';
+    : 'Будет создан документ перемещения в iiko + сообщение в группу.';
 
   await ctx.editMessageText(
     `Роль: ${roleLabel}\n\n` +
     `Позиции (${items.length}):\n${itemsList}\n\n` +
-    `${actionText}\n\n` +
-    `Подтвердить перемещение?`,
+    `${actionText}\n\nПодтвердить?`,
     Markup.inlineKeyboard([
       [Markup.button.callback('Переместить', 'confirm_transfer')],
-      [Markup.button.callback('+ Добавить ещё', 'back_to_search')],
+      [Markup.button.callback('+ Добавить ещё', 'back_to_cats')],
       [Markup.button.callback('Отмена', 'cancel')]
     ])
   );
@@ -461,7 +480,6 @@ bot.action('confirm_transfer', async (ctx) => {
   ).join('; ');
 
   try {
-    // 1. Логируем в Google Sheets
     const rowIndex = await sheetsService.appendTransferRow({
       role: roleLabel,
       items: state.items,
@@ -470,9 +488,7 @@ bot.action('confirm_transfer', async (ctx) => {
       rawText
     });
 
-    // 2. Выполняем действие в зависимости от роли
     if (state.role === 'kitchen') {
-      // Кухня: сообщение в группу + лог в Sheets
       const groupMessage = formatGroupMessage('kitchen', state.items, username);
       await bot.telegram.sendMessage(TRANSFER_GROUP_ID, groupMessage);
 
@@ -480,7 +496,6 @@ bot.action('confirm_transfer', async (ctx) => {
 
       await ctx.editMessageText(
         `Перемещение отправлено в группу!\n\n` +
-        `Роль: ${roleLabel}\n` +
         `Позиции (${state.items.length}):\n${formatItemsList(state.items)}`,
         Markup.inlineKeyboard([
           [Markup.button.callback('Новое перемещение', 'back_to_menu')],
@@ -488,31 +503,44 @@ bot.action('confirm_transfer', async (ctx) => {
       );
 
     } else {
-      // Склад: документ в iiko + сообщение в группу
       if (!KITCHEN_STORE_ID || !WAREHOUSE_STORE_ID) {
         await sheetsService.updateTransferRow(rowIndex, {
           status: 'IIKO_ERROR',
           errorMessage: 'Не настроены KITCHEN_STORE_ID или WAREHOUSE_STORE_ID'
         });
+        return ctx.editMessageText(
+          'Ошибка: не настроены UUID складов.\nОбратись к администратору.',
+          Markup.inlineKeyboard([[Markup.button.callback('В меню', 'back_to_menu')]])
+        );
+      }
+
+      const validItems = state.items.filter(item => item.productId);
+      const skippedItems = state.items.filter(item => !item.productId);
+
+      if (validItems.length === 0) {
+        await sheetsService.updateTransferRow(rowIndex, {
+          status: 'IIKO_ERROR',
+          errorMessage: 'Ни один товар не найден в iiko'
+        });
+
+        // Всё равно отправляем в группу как текст
+        const groupMessage = formatGroupMessage('warehouse', state.items, username);
+        await bot.telegram.sendMessage(TRANSFER_GROUP_ID, groupMessage);
 
         return ctx.editMessageText(
-          'Ошибка: не настроены UUID складов для перемещения.\n' +
-          'Обратись к администратору.',
-          Markup.inlineKeyboard([
-            [Markup.button.callback('В меню', 'back_to_menu')]
-          ])
+          'Ни один товар не найден в iiko.\nСписок отправлен в группу как текст.',
+          Markup.inlineKeyboard([[Markup.button.callback('В меню', 'back_to_menu')]])
         );
       }
 
       const iikoResult = await iikoService.createTransferDocument({
         storeFrom: KITCHEN_STORE_ID,
         storeTo: WAREHOUSE_STORE_ID,
-        items: state.items,
+        items: validItems,
         comment: `Перемещение через Telegram. ${username}`
       });
 
       if (iikoResult.success) {
-        // Сообщение в группу
         const groupMessage = formatGroupMessage('warehouse', state.items, username) +
           `\n\nДокумент iiko: ${iikoResult.documentNumber || iikoResult.documentId}`;
         await bot.telegram.sendMessage(TRANSFER_GROUP_ID, groupMessage);
@@ -523,28 +551,27 @@ bot.action('confirm_transfer', async (ctx) => {
           status: 'IIKO_OK'
         });
 
-        await ctx.editMessageText(
-          `Перемещение создано!\n\n` +
-          `Роль: ${roleLabel}\n` +
+        let successMsg = `Перемещение создано!\n\n` +
           `Документ iiko: ${iikoResult.documentNumber || iikoResult.documentId}\n\n` +
-          `Позиции (${state.items.length}):\n${formatItemsList(state.items)}`,
-          Markup.inlineKeyboard([
-            [Markup.button.callback('Новое перемещение', 'back_to_menu')],
-          ])
-        );
+          `Позиции (${validItems.length}):\n${formatItemsList(validItems)}`;
 
+        if (skippedItems.length > 0) {
+          successMsg += `\n\nПропущено (нет в iiko):\n` +
+            skippedItems.map(i => `- ${i.name}`).join('\n');
+        }
+
+        await ctx.editMessageText(successMsg,
+          Markup.inlineKeyboard([[Markup.button.callback('Новое перемещение', 'back_to_menu')]])
+        );
       } else {
         const errorMsg = iikoResult.errors?.join(', ') || iikoResult.error || 'Неизвестная ошибка';
-
         await sheetsService.updateTransferRow(rowIndex, {
           status: 'IIKO_ERROR',
           errorMessage: errorMsg
         });
 
         await ctx.editMessageText(
-          `Ошибка создания документа в iiko!\n\n` +
-          `Ошибка: ${errorMsg}\n\n` +
-          `Данные сохранены в журнал.`,
+          `Ошибка iiko: ${errorMsg}\n\nДанные сохранены в журнал.`,
           Markup.inlineKeyboard([
             [Markup.button.callback('Попробовать снова', 'retry_transfer')],
             [Markup.button.callback('В меню', 'back_to_menu')]
@@ -557,14 +584,10 @@ bot.action('confirm_transfer', async (ctx) => {
 
   } catch (error) {
     console.error('Error in confirm_transfer:', error);
-
     await ctx.editMessageText(
-      `Произошла ошибка: ${error.message}\n\nПопробуй ещё раз.`,
-      Markup.inlineKeyboard([
-        [Markup.button.callback('В меню', 'back_to_menu')]
-      ])
+      `Ошибка: ${error.message}\n\nПопробуй ещё раз.`,
+      Markup.inlineKeyboard([[Markup.button.callback('В меню', 'back_to_menu')]])
     );
-
     clearUserState(userId);
   }
 });
@@ -572,31 +595,19 @@ bot.action('confirm_transfer', async (ctx) => {
 // ==================== CALLBACK: Повторить перемещение ====================
 bot.action('retry_transfer', async (ctx) => {
   await ctx.answerCbQuery();
-
   const state = getUserState(ctx.from.id);
 
   if (!state.items || state.items.length === 0) {
     return ctx.editMessageText(
-      'Нет данных для повтора. Начни заново.',
-      Markup.inlineKeyboard([
-        [Markup.button.callback('В меню', 'back_to_menu')]
-      ])
+      'Нет данных для повтора.',
+      Markup.inlineKeyboard([[Markup.button.callback('В меню', 'back_to_menu')]])
     );
   }
 
-  setUserState(ctx.from.id, {
-    ...state,
-    step: 'confirm'
-  });
-
-  const roleLabel = state.role === 'kitchen' ? 'Кухня' : 'Склад';
-  const itemsList = formatItemsList(state.items);
+  setUserState(ctx.from.id, { ...state, step: 'confirm' });
 
   await ctx.editMessageText(
-    `Повторная попытка...\n\n` +
-    `Роль: ${roleLabel}\n\n` +
-    `Позиции (${state.items.length}):\n${itemsList}\n\n` +
-    `Подтвердить перемещение?`,
+    `Повторная попытка...\n\nПозиции (${state.items.length}):\n${formatItemsList(state.items)}\n\nПодтвердить?`,
     Markup.inlineKeyboard([
       [Markup.button.callback('Переместить', 'confirm_transfer')],
       [Markup.button.callback('Отмена', 'cancel')]
@@ -604,7 +615,7 @@ bot.action('retry_transfer', async (ctx) => {
   );
 });
 
-// ==================== CALLBACK: История перемещений ====================
+// ==================== CALLBACK: История ====================
 bot.action('history', async (ctx) => {
   await ctx.answerCbQuery();
 
@@ -623,30 +634,23 @@ bot.action('history', async (ctx) => {
     }
 
     let historyText = 'Последние перемещения:\n\n';
-
     for (const t of transfers) {
       const statusEmoji = (t.status === 'IIKO_OK' || t.status === 'SENT') ? '✅' : t.status === 'IIKO_ERROR' ? '❌' : '⏳';
       historyText += `${statusEmoji} ${t.timestamp}\n`;
       historyText += `Роль: ${t.role}\n`;
       const shortText = (t.rawText || '').substring(0, 50) + ((t.rawText?.length || 0) > 50 ? '...' : '');
-      if (shortText) {
-        historyText += `${shortText}\n`;
-      }
-      if (t.iikoDocNumber || t.iikoDocumentId) {
-        historyText += `Doc: ${t.iikoDocNumber || t.iikoDocumentId}\n`;
-      }
+      if (shortText) historyText += `${shortText}\n`;
+      if (t.iikoDocNumber || t.iikoDocumentId) historyText += `Doc: ${t.iikoDocNumber || t.iikoDocumentId}\n`;
       historyText += '\n';
     }
 
-    await ctx.editMessageText(
-      historyText,
+    await ctx.editMessageText(historyText,
       Markup.inlineKeyboard([
         [Markup.button.callback('Кухня', 'role_kitchen')],
         [Markup.button.callback('Склад', 'role_warehouse')],
         [Markup.button.callback('В меню', 'back_to_menu')]
       ])
     );
-
   } catch (error) {
     console.error('Error getting history:', error);
     ctx.editMessageText('Ошибка загрузки истории.');
@@ -688,7 +692,6 @@ bot.action('back_to_menu', async (ctx) => {
 async function sendDailyReport() {
   try {
     console.log('Generating daily report...');
-
     const stats = await sheetsService.getTodayTransfers();
 
     const today = new Date().toLocaleDateString('ru-RU', {
@@ -703,46 +706,34 @@ async function sendDailyReport() {
     if (stats.total === 0) {
       message += `Перемещений за сегодня не было.`;
     } else {
-      message += `Всего перемещений: ${stats.total}\n`;
+      message += `Всего: ${stats.total}\n`;
       message += `Успешно: ${stats.success}\n`;
-      if (stats.errors > 0) {
-        message += `Ошибок: ${stats.errors}\n`;
-      }
-      if (stats.pending > 0) {
-        message += `В обработке: ${stats.pending}\n`;
-      }
+      if (stats.errors > 0) message += `Ошибок: ${stats.errors}\n`;
+      if (stats.pending > 0) message += `В обработке: ${stats.pending}\n`;
 
-      // По ролям
       message += `\nПо ролям:\n`;
       for (const [role, count] of Object.entries(stats.byRole)) {
-        if (count > 0) {
-          message += `  ${role}: ${count}\n`;
-        }
+        if (count > 0) message += `  ${role}: ${count}\n`;
       }
 
-      // Последние 5 перемещений
       if (stats.items.length > 0) {
-        message += `\nПоследние перемещения:\n`;
+        message += `\nПоследние:\n`;
         const lastItems = stats.items.slice(-5).reverse();
         for (const item of lastItems) {
-          const statusIcon = (item.status === 'IIKO_OK' || item.status === 'SENT') ? '✅' : item.status === 'IIKO_ERROR' ? '❌' : '⏳';
-          const shortMsg = item.rawText.length > 40
-            ? item.rawText.substring(0, 40) + '...'
-            : item.rawText;
-          message += `${statusIcon} [${item.role}] ${shortMsg}\n`;
+          const icon = (item.status === 'IIKO_OK' || item.status === 'SENT') ? '✅' : item.status === 'IIKO_ERROR' ? '❌' : '⏳';
+          const shortMsg = item.rawText.length > 40 ? item.rawText.substring(0, 40) + '...' : item.rawText;
+          message += `${icon} [${item.role}] ${shortMsg}\n`;
         }
       }
     }
 
     await bot.telegram.sendMessage(TRANSFER_GROUP_ID, message);
     console.log('Daily report sent to group');
-
   } catch (error) {
     console.error('Error sending daily report:', error.message);
   }
 }
 
-// Крон-задача: каждый день в 21:30 по Новосибирску
 cron.schedule('30 21 * * *', async () => {
   console.log('Running daily report cron job...');
   try {
@@ -751,22 +742,13 @@ cron.schedule('30 21 * * *', async () => {
   } catch (error) {
     console.error('Daily report cron job failed:', error.message);
   }
-}, {
-  timezone: 'Asia/Novosibirsk'
-});
+}, { timezone: 'Asia/Novosibirsk' });
 
-console.log('Daily report scheduled for 21:30 Novosibirsk time (Asia/Novosibirsk)');
+console.log('Daily report scheduled for 21:30 Novosibirsk time');
 
 // ==================== GRACEFUL SHUTDOWN ====================
-process.once('SIGINT', () => {
-  console.log('Received SIGINT, stopping bot...');
-  bot.stop('SIGINT');
-});
-
-process.once('SIGTERM', () => {
-  console.log('Received SIGTERM, stopping bot...');
-  bot.stop('SIGTERM');
-});
+process.once('SIGINT', () => { console.log('SIGINT'); bot.stop('SIGINT'); });
+process.once('SIGTERM', () => { console.log('SIGTERM'); bot.stop('SIGTERM'); });
 
 // ==================== ЗАПУСК БОТА ====================
 async function start() {
@@ -778,33 +760,37 @@ async function start() {
     const productsLoaded = await loadProducts();
 
     if (productsLoaded) {
-      console.log('iiko references loaded successfully');
-      console.log(`  Products: ${PRODUCTS.length}`);
+      console.log(`Products: ${PRODUCTS.length}`);
+
+      // Проверяем сопоставление каталога с iiko
+      let matched = 0;
+      let unmatched = [];
+      for (const cat of CATALOG) {
+        for (const name of cat.products) {
+          if (findProductInIiko(name)) {
+            matched++;
+          } else {
+            unmatched.push(name);
+          }
+        }
+      }
+      console.log(`Catalog: ${matched} matched, ${unmatched.length} unmatched`);
+      if (unmatched.length > 0) {
+        console.log('Unmatched:', unmatched.join(', '));
+      }
     } else {
-      console.warn('Warning: Could not load products. Will retry on first request.');
+      console.warn('Warning: Could not load products.');
     }
 
-    if (KITCHEN_STORE_ID) {
-      console.log(`Kitchen store ID: ${KITCHEN_STORE_ID}`);
-    } else {
-      console.warn('Warning: KITCHEN_STORE_ID not set');
-    }
+    if (KITCHEN_STORE_ID) console.log(`Kitchen store: ${KITCHEN_STORE_ID}`);
+    else console.warn('Warning: KITCHEN_STORE_ID not set');
 
-    if (WAREHOUSE_STORE_ID) {
-      console.log(`Warehouse store ID: ${WAREHOUSE_STORE_ID}`);
-    } else {
-      console.warn('Warning: WAREHOUSE_STORE_ID not set');
-    }
+    if (WAREHOUSE_STORE_ID) console.log(`Warehouse store: ${WAREHOUSE_STORE_ID}`);
+    else console.warn('Warning: WAREHOUSE_STORE_ID not set');
 
-    bot.launch().then(() => {
-      console.log('Bot polling started');
-    });
-
+    bot.launch().then(() => console.log('Bot polling started'));
     await new Promise(resolve => setTimeout(resolve, 2000));
-
     console.log('Bot started successfully!');
-    console.log(`Bot username: @shrmtransferbot`);
-    console.log('Send /start to the bot in Telegram to test');
 
   } catch (error) {
     console.error('Failed to start bot:', error);
