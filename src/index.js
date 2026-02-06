@@ -81,6 +81,23 @@ function formatItemsList(items) {
   ).join('\n');
 }
 
+/**
+ * Форматировать сообщение для группы
+ */
+function formatGroupMessage(role, items, username) {
+  const direction = role === 'kitchen'
+    ? 'Кухня запрашивает товары'
+    : 'Перемещение: Кухня -> Склад';
+
+  let message = `📦 ${direction}\n`;
+  message += `👤 ${username}\n\n`;
+  message += items.map((item, i) =>
+    `${i + 1}. ${item.name} — ${item.amount} ${item.unit}`
+  ).join('\n');
+
+  return message;
+}
+
 // ==================== КОМАНДА /start ====================
 bot.command('start', async (ctx) => {
   clearUserState(ctx.from.id);
@@ -455,11 +472,14 @@ bot.action('confirm_transfer', async (ctx) => {
 
     // 2. Выполняем действие в зависимости от роли
     if (state.role === 'kitchen') {
-      // Кухня: логируем в Sheets
+      // Кухня: сообщение в группу + лог в Sheets
+      const groupMessage = formatGroupMessage('kitchen', state.items, username);
+      await bot.telegram.sendMessage(TRANSFER_GROUP_ID, groupMessage);
+
       await sheetsService.updateTransferRow(rowIndex, { status: 'SENT' });
 
       await ctx.editMessageText(
-        `Перемещение сохранено!\n\n` +
+        `Перемещение отправлено в группу!\n\n` +
         `Роль: ${roleLabel}\n` +
         `Позиции (${state.items.length}):\n${formatItemsList(state.items)}`,
         Markup.inlineKeyboard([
@@ -492,6 +512,11 @@ bot.action('confirm_transfer', async (ctx) => {
       });
 
       if (iikoResult.success) {
+        // Сообщение в группу
+        const groupMessage = formatGroupMessage('warehouse', state.items, username) +
+          `\n\nДокумент iiko: ${iikoResult.documentNumber || iikoResult.documentId}`;
+        await bot.telegram.sendMessage(TRANSFER_GROUP_ID, groupMessage);
+
         await sheetsService.updateTransferRow(rowIndex, {
           iikoDocumentId: iikoResult.documentId,
           iikoDocumentNumber: iikoResult.documentNumber,
