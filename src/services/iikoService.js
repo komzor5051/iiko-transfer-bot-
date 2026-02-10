@@ -198,7 +198,7 @@ class IikoService {
 
   /**
    * Создать документ перемещения (internal transfer)
-   * POST /resto/api/v2/documents/outgoing
+   * POST /resto/api/v2/documents/internalTransfer
    *
    * @param {Object} params
    * @param {string} params.storeFrom - UUID склада-источника
@@ -219,8 +219,8 @@ class IikoService {
       const documentBody = {
         dateIncoming,
         status: 'NEW',
-        storeFrom,
-        storeTo,
+        storeFromId: storeFrom,
+        storeToId: storeTo,
         comment: comment || `Перемещение от ${now.toLocaleDateString('ru-RU')}`,
         items: items.map(item => ({
           productId: item.productId,
@@ -230,7 +230,7 @@ class IikoService {
 
       console.log('Request body:', JSON.stringify(documentBody, null, 2));
 
-      const response = await this.makeRequest('documents/outgoing', 'POST', documentBody);
+      const response = await this.makeRequest('documents/internalTransfer', 'POST', documentBody);
 
       console.log('Transfer created:', JSON.stringify(response, null, 2));
 

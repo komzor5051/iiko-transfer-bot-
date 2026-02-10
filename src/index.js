@@ -132,7 +132,7 @@ function formatItemsList(items) {
 function formatGroupMessage(role, items, username) {
   const direction = role === 'kitchen'
     ? 'Кухня запрашивает товары'
-    : 'Перемещение: Кухня -> Склад';
+    : 'Перемещение: Склад -> Кухня';
 
   let message = `📦 ${direction}\n`;
   message += `👤 ${username}\n\n`;
@@ -534,8 +534,8 @@ bot.action('confirm_transfer', async (ctx) => {
       }
 
       const iikoResult = await iikoService.createTransferDocument({
-        storeFrom: KITCHEN_STORE_ID,
-        storeTo: WAREHOUSE_STORE_ID,
+        storeFrom: WAREHOUSE_STORE_ID,
+        storeTo: KITCHEN_STORE_ID,
         items: validItems,
         comment: `Перемещение через Telegram. ${username}`
       });
