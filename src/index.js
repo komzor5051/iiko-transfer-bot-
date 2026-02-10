@@ -64,6 +64,11 @@ const CATALOG = [
   }
 ];
 
+// Переопределение единиц измерения для конкретных товаров каталога
+const UNIT_OVERRIDES = {
+  'Люля куриный': 'порц'
+};
+
 // ==================== КЭШ НОМЕНКЛАТУРЫ ====================
 let PRODUCTS = [];
 
@@ -337,7 +342,7 @@ bot.action(/^prod:(\d+):(\d+)$/, async (ctx) => {
     selectedProduct: {
       id: iikoProduct?.id || null,
       name: catalogName,
-      mainUnit: iikoProduct?.mainUnit || 'кг'
+      mainUnit: UNIT_OVERRIDES[catalogName] || iikoProduct?.mainUnit || 'кг'
     }
   });
 
