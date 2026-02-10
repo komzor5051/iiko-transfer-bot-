@@ -6,7 +6,7 @@ const GoogleSheetsService = require('./services/googleSheetsService');
 const IikoService = require('./services/iikoService');
 
 // ID группы для уведомлений о перемещениях
-const TRANSFER_GROUP_ID = config.transferGroupId || -5237107467;
+const TRANSFER_GROUP_ID = config.transferGroupId || -5104426077;
 
 // UUID складов для перемещений
 const KITCHEN_STORE_ID = config.kitchenStoreId;

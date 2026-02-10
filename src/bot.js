@@ -4,6 +4,12 @@ const config = require('./config/env');
 // Создаем экземпляр бота
 const bot = new Telegraf(config.telegramBotToken);
 
+// Игнорируем сообщения из групп — бот работает только в личных чатах
+bot.use(async (ctx, next) => {
+  if (ctx.chat && ctx.chat.type !== 'private') return;
+  return next();
+});
+
 // Middleware для логирования
 bot.use(async (ctx, next) => {
   const start = Date.now();

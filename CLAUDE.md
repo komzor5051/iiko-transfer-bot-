@@ -93,7 +93,7 @@ Optional (with defaults):
 - `IIKO_LOGIN` (default: `Artem`)
 - `KITCHEN_STORE_ID` — UUID of Kitchen store in iiko (required for warehouse role to create transfer docs)
 - `WAREHOUSE_STORE_ID` — UUID of Warehouse store in iiko (required for warehouse role)
-- `TRANSFER_GROUP_ID` — Telegram group chat ID for notifications (hardcoded fallback: `-5237107467`)
+- `TRANSFER_GROUP_ID` — Telegram group chat ID for notifications (hardcoded fallback: `-5104426077`)
 - `ADMIN_TELEGRAM_IDS` — Comma-separated admin Telegram IDs
 
 ## Deployment
