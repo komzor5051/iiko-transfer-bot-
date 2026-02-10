@@ -202,6 +202,41 @@ bot.command('refresh', async (ctx) => {
   }
 });
 
+// ==================== КОМАНДА /stores (debug) ====================
+bot.command('stores', async (ctx) => {
+  try {
+    await ctx.reply('Загружаю список складов из iiko...');
+    const stores = await iikoService.getStores();
+
+    if (!stores || stores.length === 0) {
+      return ctx.reply('Складов не найдено.');
+    }
+
+    let msg = `Склады iiko (${stores.length}):\n\n`;
+    for (const store of stores) {
+      const name = store.name || store['@_name'] || 'Без имени';
+      const id = store.id || store['@_id'] || '?';
+      const parentId = store.parentId || store['@_parentId'] || '';
+      msg += `${name}\nID: ${id}\n`;
+      if (parentId) msg += `Parent: ${parentId}\n`;
+      msg += '\n';
+    }
+
+    // Telegram ограничивает сообщение 4096 символами
+    if (msg.length > 4000) {
+      const chunks = msg.match(/[\s\S]{1,4000}/g);
+      for (const chunk of chunks) {
+        await ctx.reply(chunk);
+      }
+    } else {
+      await ctx.reply(msg);
+    }
+  } catch (error) {
+    console.error('Error in /stores:', error.message);
+    await ctx.reply(`Ошибка: ${error.message}`);
+  }
+});
+
 // ==================== КОМАНДА /report ====================
 bot.command('report', async (ctx) => {
   try {
